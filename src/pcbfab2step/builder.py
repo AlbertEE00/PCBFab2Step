@@ -466,7 +466,8 @@ class Model:
                             setattr(h, f"tent_{'top' if sd == 'top' else 'bot'}", True)
                     h.prot_src = (h.prot_src + ", " if h.prot_src else "") + f"layer {L.name}"
             if hit:
-                self.prot_notes.append(f"layer {L.name}: {role} applied to {len(hit)} hole(s) ({'/'.join(sides)})")
+                self.prot_notes.append(f"layer {L.name}: {role} applied to {len(hit)} hole(s) ({'/'.join(sides)})"
+                                       + (f" [{L.points_note}]" if L.points_note else ""))
             elif pts:
                 warn(f"via-protection layer {L.name} ({role}) matched no plated hole")
 
@@ -620,6 +621,29 @@ class Model:
         self.cuts.append(Cut(region, lo, hi, kind, side == "top", side == "bottom"))
         for h in holes:
             self._trim_hole(h, side, z_end)
+        return abs(surf - z_end)
+
+    def _add_backdrill(self, x, y, r, side, z_end, holes):
+        """A back drill bore. It removes the plating above (top) or below
+        (bottom) z_end. On a filled via the fill closes the bore up to the
+        surface (vias are filled after back drilling) and the via keeps its
+        cap on that side; the coatings then cover it. An open bore cuts the
+        coatings and ends any cap, plug or tenting on that side."""
+        surf = self._surface(side)
+        lo, hi = (z_end, surf) if side == "top" else (surf, z_end)
+        filled = [h for h in holes if h.fill]
+        pierce = not filled
+        self.cuts.append(Cut(circle(x, y, r), lo, hi, "backdrill", pierce and side == "top",
+                             pierce and side == "bottom", hole=filled[0] if filled else None))
+        for h in holes:
+            if h.fill:
+                if side == "top":
+                    h.z_hi_eff = min(h.z_hi_eff, z_end)
+                else:
+                    h.z_lo_eff = max(h.z_lo_eff, z_end)
+                h.bores[side] = (max(r, h.bores.get(side, (0.0,))[0]), z_end)
+            else:
+                self._trim_hole(h, side, z_end)
         return abs(surf - z_end)
 
     def _add_countersink(self, x, y, r_wide, angle, side, h):
@@ -816,7 +840,11 @@ class Model:
                 z_end = min(surf, M.z1 + stub) if side == "top" else max(surf, M.z0 - stub)
                 how = (f"up to the must-not-cut layer {mnc}" if stub <= 0 else
                        f"stopping {stub * 1000:g} um short of the must-not-cut layer {mnc} (stub from {stub_src})")
-            depth = self._add_counterbore(b.x, b.y, r, side, z_end, holes, "backdrill")
+            filled = [h for h in holes if h.fill]
+            depth = self._add_backdrill(b.x, b.y, r, side, z_end, holes)
+            if filled:
+                capped = any((h.cap_top if side == "top" else h.cap_bot) for h in filled)
+                how += "; bore filled" + (" and capped" if capped else "") + " with the via"
             bgroups[(b.layer, round(b.d, 4), side, round(depth, 4), how, bool(holes))] += 1
         for (lname, d, side, depth, how, ok), k in sorted(bgroups.items()):
             self.hole_notes.append(f"{lname}: {k} x backdrill {d:.3f} mm from {side}, depth {depth:.4f} mm, {how}"
@@ -1145,8 +1173,19 @@ class Model:
             tps[("via" if h.kind == "via" else "pth", round(tp * 1000, 1))] += 1
             ct = self._cap_t(h, "top") if h.cap_top > 0 else 0.0
             cb = self._cap_t(h, "bot") if h.cap_bot > 0 else 0.0
-            zlo = h.z_lo_eff + cb
-            zhi = h.z_hi_eff - ct
+            bore_t, bore_b = h.bores.get("top"), h.bores.get("bottom")
+            # the plated barrel; on a filled back drilled side it ends at the bore
+            zlo = h.z_lo_eff + (0.0 if bore_b else cb)
+            zhi = h.z_hi_eff - (0.0 if bore_t else ct)
+            if h.fill:
+                if bore_t:
+                    r_b, z_e = bore_t
+                    s = Brep.disc_prism(h.x, h.y, r_b, 0.0, z_e, h.z_hi - ct)
+                    fills.append((h.fill, [s] if s is not None else []))
+                if bore_b:
+                    r_b, z_e = bore_b
+                    s = Brep.disc_prism(h.x, h.y, r_b, 0.0, h.z_lo + cb, z_e)
+                    fills.append((h.fill, [s] if s is not None else []))
             bottom_cup = None
             if h.laser:
                 # plated cup: barrel plus plating on the target land
@@ -1154,62 +1193,65 @@ class Model:
                     bottom_cup = (h.z_lo_eff, h.z_lo_eff + tp)
                 elif h.entry == "bottom" and h.z_hi_eff == h.z_hi:
                     bottom_cup = (h.z_hi_eff - tp, h.z_hi_eff)
-            if zhi - zlo <= 1e-6:
-                continue
-            if h.round:
-                s = Brep.disc_prism(h.x, h.y, h.r_drill, h.r_fin, zlo, zhi)
-                if s is not None:
-                    plating.append(s)
-                if bottom_cup and h.r_fin > 0:
-                    s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, *bottom_cup)
+            if zhi - zlo > 1e-6:      # barrel left (a via can be back drilled from both sides)
+                if h.round:
+                    s = Brep.disc_prism(h.x, h.y, h.r_drill, h.r_fin, zlo, zhi)
                     if s is not None:
                         plating.append(s)
-            else:
-                ring = clean(gdiff(h.geom_drill, h.geom_fin))
-                plating += Brep.prisms(ring, zlo, zhi)
-            if h.dual:
-                r_dd, z_end, side = h.dual
-                surf = self._surface(side)
-                a, b = (z_end, surf) if side == "top" else (surf, z_end)
-                s = Brep.disc_prism(h.x, h.y, r_dd, max(r_dd - tp, h.r_fin), a, b)
-                if s is not None:
-                    plating.append(s)
-                fa, fb = (z_end, z_end + tp) if side == "top" else (z_end - tp, z_end)
-                s = Brep.disc_prism(h.x, h.y, max(r_dd - tp, h.r_fin), h.r_fin, fa, fb)
-                if s is not None:
-                    plating.append(s)
-            # fill / plugs inside the finished bore
-            f_lo, f_hi = zlo, zhi
-            if bottom_cup:
-                if h.entry == "top":
-                    f_lo = bottom_cup[1]
+                    if bottom_cup and h.r_fin > 0:
+                        s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, *bottom_cup)
+                        if s is not None:
+                            plating.append(s)
                 else:
-                    f_hi = bottom_cup[0]
-            if h.r_fin > 1e-6 and f_hi - f_lo > 1e-6:
-                if h.fill:
-                    fill_mats[h.fill] += 1
-                    if h.round:
-                        s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, f_lo, f_hi)
-                        fills.append((h.fill, [s] if s is not None else []))
+                    ring = clean(gdiff(h.geom_drill, h.geom_fin))
+                    plating += Brep.prisms(ring, zlo, zhi)
+                if h.dual:
+                    r_dd, z_end, side = h.dual
+                    surf = self._surface(side)
+                    a, b = (z_end, surf) if side == "top" else (surf, z_end)
+                    s = Brep.disc_prism(h.x, h.y, r_dd, max(r_dd - tp, h.r_fin), a, b)
+                    if s is not None:
+                        plating.append(s)
+                    fa, fb = (z_end, z_end + tp) if side == "top" else (z_end - tp, z_end)
+                    s = Brep.disc_prism(h.x, h.y, max(r_dd - tp, h.r_fin), h.r_fin, fa, fb)
+                    if s is not None:
+                        plating.append(s)
+                # fill / plugs inside the finished bore
+                f_lo, f_hi = zlo, zhi
+                if bottom_cup:
+                    if h.entry == "top":
+                        f_lo = bottom_cup[1]
                     else:
-                        fills.append((h.fill, Brep.prisms(h.geom_fin, f_lo, f_hi)))
-                else:
-                    Ltot = f_hi - f_lo
-                    for frac, a, b in ((h.plug_top, f_hi - h.plug_top * Ltot, f_hi),
-                                       (h.plug_bot, f_lo, f_lo + h.plug_bot * Ltot)):
-                        if frac > 0:
-                            if h.round:
-                                s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, a, b)
-                                if s is not None:
-                                    plugs.append(s)
-                            else:
-                                plugs += Brep.prisms(h.geom_fin, a, b)
-            # caps close the drilled hole flush with the land surface (the land
-            # copper thickness already includes the cap plating)
-            for r, a, b in ((h.cap_top, h.z_hi - ct, h.z_hi), (h.cap_bot, h.z_lo, h.z_lo + cb)):
+                        f_hi = bottom_cup[0]
+                if h.r_fin > 1e-6 and f_hi - f_lo > 1e-6:
+                    if h.fill:
+                        fill_mats[h.fill] += 1
+                        if h.round:
+                            s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, f_lo, f_hi)
+                            fills.append((h.fill, [s] if s is not None else []))
+                        else:
+                            fills.append((h.fill, Brep.prisms(h.geom_fin, f_lo, f_hi)))
+                    else:
+                        Ltot = f_hi - f_lo
+                        for frac, a, b in ((h.plug_top, f_hi - h.plug_top * Ltot, f_hi),
+                                           (h.plug_bot, f_lo, f_lo + h.plug_bot * Ltot)):
+                            if frac > 0:
+                                if h.round:
+                                    s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, a, b)
+                                    if s is not None:
+                                        plugs.append(s)
+                                else:
+                                    plugs += Brep.prisms(h.geom_fin, a, b)
+            # caps close the drilled hole (or the filled back drill bore) flush with
+            # the land surface (the land copper thickness already includes the cap plating)
+            for r, a, b, bore in ((h.cap_top, h.z_hi - ct, h.z_hi, bore_t), (h.cap_bot, h.z_lo, h.z_lo + cb, bore_b)):
                 if r <= 0 or b - a <= 1e-9:
                     continue
-                if h.round:
+                if bore:
+                    s = Brep.disc_prism(h.x, h.y, bore[0], 0.0, a, b)
+                    if s is not None:
+                        caps.append(s)
+                elif h.round:
                     s = Brep.disc_prism(h.x, h.y, h.r_drill, 0.0, a, b)
                     if s is not None:
                         caps.append(s)

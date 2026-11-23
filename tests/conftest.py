@@ -8,7 +8,10 @@ import pytest
 # A 40 x 30 mm, three-copper-layer board in IPC-2581 rev B as Altium writes it:
 # file coordinates offset by the Datum (10, 10), per-layer hole diameters in the
 # padstacks for a top countersink and a bottom counterbore, a back drill layer
-# with its Backdrill spec, and a "Filling" document layer.
+# with its Backdrill spec, and "Filling" / "Capping" document layers: the via
+# markers are pads of their own padstacks (as Altium writes IPC-4761 via
+# features), the drawn circle on "Filling" at (35, 30) is artwork, and the
+# "Plugging Bottom" layer has drawn markers only (an arc around (35, 30)).
 IPC_XML = textwrap.dedent("""\
     <?xml version="1.0" encoding="utf-8"?>
     <IPC-2581 revision="B" xmlns="http://webstds.ipc.org/2581">
@@ -18,6 +21,7 @@ IPC_XML = textwrap.dedent("""\
         <DictionaryStandard units="MILLIMETER">
           <EntryStandard id="CIRCLE_1"><Circle diameter="1.0"/></EntryStandard>
           <EntryStandard id="RECT_1"><RectCenter width="1.0" height="2.0"/></EntryStandard>
+          <EntryStandard id="CIRCLE_2"><Circle diameter="0.7"/></EntryStandard>
         </DictionaryStandard>
       </Content>
       <Ecad name="test">
@@ -42,6 +46,8 @@ IPC_XML = textwrap.dedent("""\
           <Layer name="Top Solder" layerFunction="SOLDERMASK" side="TOP" polarity="POSITIVE"/>
           <Layer name="Top Overlay" layerFunction="LEGEND" side="TOP" polarity="POSITIVE"/>
           <Layer name="Filling" layerFunction="DOCUMENT" side="INTERNAL" polarity="POSITIVE"/>
+          <Layer name="Capping" layerFunction="DOCUMENT" side="INTERNAL" polarity="POSITIVE"/>
+          <Layer name="Plugging Bottom" layerFunction="DOCUMENT" side="INTERNAL" polarity="POSITIVE"/>
           <Layer name="Drill Guide (TOP - BOT)" layerFunction="DRILL" side="INTERNAL" polarity="POSITIVE"/>
           <Layer name="Drill Guide ([BD] TOP - MID)" layerFunction="DRILL" side="INTERNAL" polarity="POSITIVE">
             <SpanType fromLayer="TOP" toLayer="MID"/>
@@ -91,6 +97,14 @@ IPC_XML = textwrap.dedent("""\
               <LayerPad layerRef="TOP"><Location x="25" y="20"/><StandardPrimitiveRef id="CIRCLE_1"/></LayerPad>
               <LayerPad layerRef="BOT"><Location x="25" y="20"/><StandardPrimitiveRef id="CIRCLE_1"/></LayerPad>
             </PadStack>
+            <PadStack net="No Net">
+              <LayerPad layerRef="Filling"><Xform/><Location x="25" y="20"/>
+                <StandardPrimitiveRef id="CIRCLE_1"/></LayerPad>
+            </PadStack>
+            <PadStack net="No Net">
+              <LayerPad layerRef="Capping"><Xform/><Location x="25" y="20"/>
+                <StandardPrimitiveRef id="CIRCLE_2"/></LayerPad>
+            </PadStack>
             <PadStack net="GND">
               <LayerPad layerRef="TOP"><Xform rotation="90"/><Location x="20" y="15"/>
                 <StandardPrimitiveRef id="RECT_1"/></LayerPad>
@@ -122,6 +136,14 @@ IPC_XML = textwrap.dedent("""\
             </LayerFeature>
             <LayerFeature layerRef="Filling">
               <Set><Features><Location x="35" y="30"/><StandardPrimitiveRef id="CIRCLE_1"/></Features></Set>
+            </LayerFeature>
+            <LayerFeature layerRef="Plugging Bottom">
+              <Set><Features><UserSpecial>
+                <Arc startX="35.3" startY="30" endX="35.3" endY="30" centerX="35" centerY="30" clockwise="false">
+                  <LineDesc lineEnd="ROUND" lineWidth="0.05" lineProperty="SOLID"/></Arc>
+                <Line startX="10" startY="10" endX="50" endY="40">
+                  <LineDesc lineEnd="ROUND" lineWidth="0.1" lineProperty="SOLID"/></Line>
+              </UserSpecial></Features></Set>
             </LayerFeature>
             <LayerFeature layerRef="Drill Guide (TOP - BOT)">
               <Set><Hole name="MH1" diameter="2.0" platingStatus="NONPLATED" x="30" y="25"/></Set>

@@ -416,15 +416,59 @@ class Geo:
         return parts
 
     def points(self, s) -> List[Tuple[float, float, float]]:
-        """(x, y, size) of each feature of a Set (document layers)."""
+        """(x, y, size) of each primitive of a Set (document layers): arcs by
+        their centre, lines by their middle, shapes by their centroid. Group
+        features (UserSpecial) are taken apart, so markers drawn next to each
+        other are not merged."""
         out = []
+        k = self.doc.k
         for fe in s.findall("Features"):
-            g = self.placed(fe)
-            for p in iter_polys(g):
-                c = p.centroid
-                x0, y0, x1, y1 = p.bounds
-                out.append((c.x, c.y, min(x1 - x0, y1 - y0)))
+            loc = fe.find("Location")
+            for c in fe:
+                if c.tag in self.META:
+                    continue
+                if loc is None and c.tag in ("Arc", "Line", "UserSpecial"):
+                    out.extend(self._prim_points(c, k))
+                    continue
+                g = self.placed_one(fe, c)
+                for p in iter_polys(g):
+                    cc = p.centroid
+                    x0, y0, x1, y1 = p.bounds
+                    out.append((cc.x, cc.y, min(x1 - x0, y1 - y0)))
         return out
+
+    def _prim_points(self, el, k):
+        out = []
+        if el.tag == "UserSpecial":
+            for c in el:
+                out.extend(self._prim_points(c, k))
+            return out
+        w, _ = self.line_desc(el, k)
+        if el.tag == "Arc":
+            cx, cy = self.doc.pt(_f(el, "centerX"), _f(el, "centerY"))
+            sx, sy = self.doc.pt(_f(el, "startX"), _f(el, "startY"))
+            out.append((cx, cy, 2.0 * math.hypot(sx - cx, sy - cy) + w))
+        elif el.tag == "Line":
+            x0, y0 = self.doc.pt(_f(el, "startX"), _f(el, "startY"))
+            x1, y1 = self.doc.pt(_f(el, "endX"), _f(el, "endY"))
+            out.append(((x0 + x1) / 2.0, (y0 + y1) / 2.0, max(math.hypot(x1 - x0, y1 - y0), w)))
+        else:
+            g = self.any_feature(el, k)
+            for p in iter_polys(g):
+                cc = p.centroid
+                x0, y0, x1, y1 = p.bounds
+                out.append((cc.x, cc.y, min(x1 - x0, y1 - y0)))
+        return out
+
+    def placed_one(self, parent, child):
+        """One shape of a Features element, placed like placed() does."""
+        loc = parent.find("Location")
+        local = loc is not None or child.tag in self.PRIMITIVES
+        g = self.any_feature(child, self.doc.k, local=local)
+        if g is None or g.is_empty or not local:
+            return g
+        lx, ly = (_f(loc, "x"), _f(loc, "y")) if loc is not None else (0.0, 0.0)
+        return self.transform(g, parent.find("Xform"), lx, ly)
 
 
 # --------------------------------------------------------------------------
@@ -531,7 +575,7 @@ class IpcReader:
                 L.image_fn = (lambda nm=name: self.image(nm))
                 L.empty = not self._has_geometry(name)
             if kind == "doc":
-                L.points_fn = (lambda nm=name: self.doc_points(nm))
+                L.points_fn = (lambda L=L: self.doc_points(L))
             out.append(L)
         return out
 
@@ -568,11 +612,32 @@ class IpcReader:
             acc = union_all([acc] + pads)
         return acc
 
-    def doc_points(self, name: str):
+    def doc_points(self, L: Layer):
+        """Markers of a document layer (Filling, Capping, ...). Altium writes a
+        via's IPC-4761 features as pads of their own padstacks on these layers;
+        when the layer has such pads only they count, since the drawn features
+        of the layer are artwork (footprint drawings, outlines). Without pads,
+        every drawn primitive is a marker."""
+        name = L.name
+        pads = self.pads.get(name, ())
+        if pads:
+            out = []
+            for lp in pads:
+                g = self.geo.placed(lp)
+                if g is None or g.is_empty:
+                    continue
+                c = g.centroid
+                x0, y0, x1, y1 = g.bounds
+                out.append((c.x, c.y, min(x1 - x0, y1 - y0)))
+            drawn = sum(len(s.findall("Features")) for lf in self.features.get(name, ()) for s in lf.findall("Set"))
+            L.points_note = f"{len(out)} via markers from the padstacks" + (
+                f"; {drawn} drawn feature group(s) on the layer ignored" if drawn else "")
+            return out
         out = []
         for lf in self.features.get(name, ()):
             for s in lf.findall("Set"):
                 out.extend(self.geo.points(s))
+        L.points_note = f"{len(out)} drawn features" if out else ""
         return out
 
     def outline(self):

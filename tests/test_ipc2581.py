@@ -70,14 +70,20 @@ def test_model_prepare(ipc_file, opts):
     bd = [c for c in m.cuts if c.kind == "backdrill"]
     assert len(bd) == 1 and bd[0].z_lo == pytest.approx(st.stack[2].z1)    # up to, not into, MID
     via = min(m.holes, key=lambda h: (h.x - 15) ** 2 + (h.y - 10) ** 2)
-    assert via.z_hi_eff == pytest.approx(st.stack[2].z1)
+    assert via.z_hi_eff == pytest.approx(st.stack[2].z1)                    # plating ends at MID
     cb = [c for c in m.cuts if c.kind == "counterbore"]
     assert len(cb) == 1 and cb[0].z_hi == pytest.approx(st.stack[0].z0)   # floor on TOP's lower face
     assert len(m.cones) == 1 and m.cones[0].side == "top"
     cone = m.cones[0]
     assert (cone.r_wide - cone.r_narrow) / abs(cone.z_wide - cone.z_narrow) == pytest.approx(1.0)
     filled = [h for h in m.holes if h.fill]
-    assert len(filled) == 1 and (filled[0].x, filled[0].y) == pytest.approx((25.0, 20.0))
+    assert len(filled) == 1 and (filled[0].x, filled[0].y) == pytest.approx((15.0, 10.0))   # padstack marker
+    v = filled[0]
+    assert v.cap_top > 0 and v.cap_bot > 0                       # capped both sides, back drill or not
+    assert v.bores["top"] == pytest.approx((0.25, st.stack[2].z1))  # fill closes the back drill bore
+    assert not bd[0].pierce_top and bd[0].hole is v              # coatings cover the filled bore
+    L = {L.name: L for L in b.layers}
+    assert "padstacks" in L["Filling"].points_note and "ignored" in L["Filling"].points_note
 
 
 def test_settings_override_fab_data(ipc_file, opts):
@@ -91,3 +97,31 @@ def test_settings_override_fab_data(ipc_file, opts):
     top = [c for c in cb if c.pierce_top][0]
     assert top.z_hi - top.z_lo == pytest.approx(0.3)
     assert any("from --counterhole-top" in n for n in m.hole_notes)
+
+
+def test_open_backdrill_without_fill(ipc_file, opts):
+    opts.via_fill = "none"                       # --via-fill none overrides the markers
+    opts.sources = {"via_fill": "--via-fill"}
+    m = Model(ipc2581.read(ipc_file, opts), opts)
+    m.prepare()
+    v = min(m.holes, key=lambda h: (h.x - 15) ** 2 + (h.y - 10) ** 2)
+    bd = [c for c in m.cuts if c.kind == "backdrill"][0]
+    assert not v.fill and not v.bores and v.cap_top == 0 and v.cap_bot > 0   # open bore ends the top cap
+    assert bd.pierce_top
+
+
+def test_fill_and_caps_in_step(ipc_file, tmp_path):
+    pytest.importorskip("OCP")
+    from pcbfab2step.pcbfab2step import main
+    out = tmp_path / "b.step"
+    assert main([ipc_file, "-o", str(out), "-q"]) == 0
+    text = out.read_text(encoding="latin-1")
+    assert "Via fill (epoxy)" in text and "Via caps (15 um)" in text
+
+
+def test_drawn_markers_without_pads(ipc_file, opts):
+    m = Model(ipc2581.read(ipc_file, opts), opts)
+    m.prepare()
+    v = min(m.holes, key=lambda h: (h.x - 25) ** 2 + (h.y - 20) ** 2)     # file (35, 30)
+    assert v.plug_bot > 0 and v.plug_top == 0 and not v.fill
+    assert any("Plugging Bottom: plug applied to 1 hole(s) (bottom)" in n for n in m.prot_notes)

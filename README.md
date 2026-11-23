@@ -139,6 +139,11 @@ above it instead. Stub or depth values in the fab data take precedence
 `MAX_STUB_LENGTH` when it is smaller than the drill depth: Altium writes the
 drill depth itself there, which is recognised and not taken as a stub).
 
+On a filled via the fill closes the back drill bore up to the surface (vias
+are filled after back drilling), and a capped via is capped over the bore;
+the coatings then cover it. An open bore cuts the mask and ends any cap, plug
+or tenting on that side.
+
 A back drill not larger than the plated hole it would drill out does not
 remove plating and is ignored (reported). A plated hole that repeats a back
 drill's position, size and span over a smaller plated hole is taken as that
@@ -152,6 +157,13 @@ Tenting in ODB++ and IPC-2581), then `--via-fill`, `--via-cap`, `--via-tent`,
 `--via-plug` (optionally limited by `--via-max-diameter`), then
 `--via-protection` rules such as `7:max=0.3` (fill and cap vias up to 0.3 mm)
 or `1b` (tent all vias both sides).
+
+On the document layers, Altium's via features (IPC-4761 fill, cap, ...) are
+pads at the via positions: pads in ODB++, pads of padstacks of their own in
+IPC-2581. When a layer has such pads only they mark vias; lines, arcs and
+contours on the layer are taken as artwork (footprint drawings, outlines).
+A layer without pads is read primitive by primitive (arc centres, line
+middles, shape centroids). The report says which was used.
 
 ## Output
 
@@ -206,6 +218,12 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 1.2.1: IPC-2581 via features: the Filling, Capping (and other via
+  protection) markers Altium writes as padstack pads are read, so filled and
+  capped vias come from the fab data without flags; drawn artwork on those
+  layers no longer marks vias. ODB++ uses the pads of such layers the same
+  way. The fill of a back drilled via closes the bore up to the surface and
+  the via keeps its cap there.
 - 1.2.0: package `pcbfab2step` with a shared board description, an
   IPC-2581 reader (geometry, and counterhole types and angles from the
   padstack hole diameters), NC drill off by default (`--ncdrill`),

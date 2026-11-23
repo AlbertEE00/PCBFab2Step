@@ -42,6 +42,7 @@ class Layer:
     attrs: Dict[str, object] = field(default_factory=dict)
     image_fn: Optional[Callable[[], object]] = None   # raw 2D image (not clipped)
     points_fn: Optional[Callable[[], list]] = None    # [(x, y, size)] of the features (document layers)
+    points_note: str = ""            # what points_fn used (report)
     implicit: bool = False
     # set by the builder
     side: str = ""
@@ -100,6 +101,8 @@ class Hole:
     z_hi_eff: float = 0.0
     pierce: bool = True
     dual: Optional[tuple] = None     # (r_dd, z_end, side)
+    # side -> (radius, z_end) of a back drill bore that the via fill closes
+    bores: Dict[str, tuple] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
 
     def region_drill(self):

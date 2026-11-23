@@ -1520,14 +1520,21 @@ class OdbReader:
         return None
 
     def _doc_points(self, L: Layer):
-        pts = []
+        """Markers of a document layer (Filling, Capping, ...). Altium writes a
+        via's IPC-4761 features there as pads; when the layer has pads only
+        they count (lines, arcs and surfaces are artwork), else every feature."""
+        pads, other = [], []
         for s, M in self.instances:
             ff = self.ff(s, L.key)
             for rec in ff.records:
                 item = self._drill_item(rec, ff, M)
                 if item:
-                    pts.append(item[:3])
-        return pts
+                    (pads if rec.kind == "P" else other).append(item[:3])
+        if pads:
+            L.points_note = f"{len(pads)} pads" + (f"; {len(other)} drawn features ignored" if other else "")
+            return pads
+        L.points_note = f"{len(other)} drawn features" if other else ""
+        return other
 
     def _drills(self, board: Board):
         units = self.units
