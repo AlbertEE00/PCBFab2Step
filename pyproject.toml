@@ -1,17 +1,42 @@
 [project]
 name = "pcbfab2step"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.2.0"
+description = "Convert PCB fab data (ODB++, IPC-2581, NC drill) to coloured STEP models: full stackup, copper, mask, silkscreen, finish, holes, counterholes, back drills and via protection"
 readme = "README.md"
 authors = [
     { name = "AlbertEEWork", email = "88828318+AlbertEE00@users.noreply.github.com" }
 ]
-requires-python = ">=3.15"
-dependencies = []
+# cadquery-ocp (OpenCascade bindings) publishes wheels for CPython 3.11 to 3.14
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "numpy",
+    "shapely>=2.0",
+    "cadquery-ocp>=7.7",
+]
+keywords = ["pcb", "odb++", "ipc-2581", "step", "altium", "stackup", "3d"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+[project.optional-dependencies]
+# TrueType text fallback for ODB++ text without a stroke font, and tools/section_plot.py
+plot = ["matplotlib"]
+
+[project.urls]
+Repository = "https://github.com/AlbertEE00/PCBFab2Step"
 
 [project.scripts]
-pcbfab2step = "pcbfab2step:main"
+pcbfab2step = "pcbfab2step.pcbfab2step:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "matplotlib"]
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
