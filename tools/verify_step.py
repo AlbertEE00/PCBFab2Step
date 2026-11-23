@@ -1,7 +1,7 @@
 """Usage: python verify_step.py model.step [--overlap]
-Re-import a STEP written by odb2step and check it: names, colours, validity,
+Re-import a STEP written by pcbfab2step and check it: names, colours, validity,
 volumes, face types, pairwise overlaps between bodies."""
-import sys, time, math, itertools
+import sys, time, itertools
 from OCP.STEPCAFControl import STEPCAFControl_Reader
 from OCP.TDocStd import TDocStd_Document
 from OCP.TCollection import TCollection_ExtendedString
@@ -19,7 +19,6 @@ from OCP.BRepGProp import BRepGProp
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopAbs import TopAbs_SOLID, TopAbs_FACE
 from OCP.BRepAdaptor import BRepAdaptor_Surface
-from OCP.GeomAbs import GeomAbs_SurfaceType
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib

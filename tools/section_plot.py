@@ -2,7 +2,6 @@
 Usage: python section_plot.py model.step POS FROM TO out.png [x|y] [zmax]
   x: cut at x=POS, plot y from FROM to TO;  y: cut at y=POS, plot x.
 Requires cadquery-ocp, numpy, matplotlib."""
-"""Cross-section of the generated model through x = X0 (from the STEP file)."""
 import sys, os
 import numpy as np
 import matplotlib
@@ -14,7 +13,7 @@ from OCP.STEPCAFControl import STEPCAFControl_Reader
 from OCP.TDocStd import TDocStd_Document
 from OCP.TCollection import TCollection_ExtendedString
 from OCP.XCAFApp import XCAFApp_Application
-from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorType, XCAFDoc_ColorTool
+from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorType
 from OCP.TDataStd import TDataStd_Name
 from OCP.Quantity import Quantity_Color, Quantity_TypeOfColor
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
