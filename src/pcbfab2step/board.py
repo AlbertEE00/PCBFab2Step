@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """The shared, format-neutral board description ("virtual objects").
 
 Every reader (ODB++, IPC-2581, ...) turns its fab data into a Board; the

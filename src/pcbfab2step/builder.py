@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """Builder: turns a Board (the format-neutral description every reader
 produces) into solids. It places the stackup in z, resolves the thicknesses,
 holes, via protection, counterholes and backdrills with one precedence chain

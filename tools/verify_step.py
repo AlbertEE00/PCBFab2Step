@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """Usage: python verify_step.py model.step [--overlap]
 Re-import a STEP written by pcbfab2step and check it: names, colours, validity,
 volumes, face types, pairwise overlaps between bodies."""

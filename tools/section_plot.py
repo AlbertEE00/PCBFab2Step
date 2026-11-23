@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """Cross-section plot of a STEP file.
 Usage: python section_plot.py model.step POS FROM TO out.png [x|y] [zmax]
   x: cut at x=POS, plot y from FROM to TO;  y: cut at y=POS, plot x.

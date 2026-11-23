@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """Input discovery: what was given on the command line (files, a fab folder,
 a plain folder) -> the primary source, the secondary sources and the config
 file. Nothing is hard-coded to one layout: a single ODB++ archive or IPC-2581

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """B-rep construction with OpenCascade (cadquery-ocp): exact arcs recovered
 from tessellated rings, faces and prisms from shapely polygons, booleans, and
 the coloured, named STEP writer."""

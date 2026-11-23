@@ -279,5 +279,10 @@ The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
 ## License
 
-No license has been chosen yet; until a LICENSE file is added, the default
-copyright applies.
+This project is dual-licensed under the **GNU Affero General Public License v3.0 (AGPLv3)** and a **Commercial License**.
+
+* **Open-Source License (AGPLv3):** You may use, modify, and distribute this software for free under the terms of the AGPLv3 (see the [LICENSE.txt](LICENSE.txt) file). If you distribute this software or run a modified version as a network service (SaaS), you must release your complete source code under the AGPLv3 and retain all copyright notices.
+* **Commercial License:** If you wish to use this software in a proprietary or closed-source product without complying with the copyleft obligations of the AGPLv3, you must purchase a commercial license. Contact **albertvzsmail@gmail.com** for commercial licensing inquiries.
+
+Every source file carries the notice
+`SPDX-License-Identifier: AGPL-3.0-only`, Copyright (C) 2026 Albert van Zyl.

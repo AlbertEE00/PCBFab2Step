@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """Synthetic fab data for the tests (no proprietary designs in the repository)."""
 
 import os

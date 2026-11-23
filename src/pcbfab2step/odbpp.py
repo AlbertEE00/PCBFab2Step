@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """ODB++ reader: product model (folder, .tgz/.tar or .zip) -> Board.
 
 Parses the matrix, layer attributes, feature files (all standard symbols,

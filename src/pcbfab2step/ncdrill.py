@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """NC drill reader (secondary source): Altium's .DRR drill report gives the
 counterhole depth and angle per tool, the Excellon drill files the hit
 positions. ODB++ has no field for counterhole type, depth or angle; the NC

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """PCBFab2Step command line: fab data (ODB++, IPC-2581, NC drill) -> coloured STEP.
 
     pcbfab2step INPUT... [options]          convert (same as 'pcbfab2step convert ...')

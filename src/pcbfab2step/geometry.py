@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """2D geometry: shapely helpers, phase-locked tessellation, primitive shapes and
 2D transforms. Units are millimetres; arcs are tessellated finely here and
 recovered as exact circles when the B-rep is built (brep.py)."""

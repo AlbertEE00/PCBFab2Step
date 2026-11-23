@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Albert van Zyl
+
 """Settings: colours, the config.toml format, and the merge of command line,
 config file and built-in defaults into one options object.
 
