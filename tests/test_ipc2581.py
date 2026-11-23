@@ -125,3 +125,21 @@ def test_drawn_markers_without_pads(ipc_file, opts):
     v = min(m.holes, key=lambda h: (h.x - 25) ** 2 + (h.y - 20) ** 2)     # file (35, 30)
     assert v.plug_bot > 0 and v.plug_top == 0 and not v.fill
     assert any("Plugging Bottom: plug applied to 1 hole(s) (bottom)" in n for n in m.prot_notes)
+
+
+def test_tent_closes_only_via_openings(ipc_file, opts):
+    """Via padstack pads on the mask are the vias' own openings; a via inside a
+    drawn opening stays open (the artwork asks for no mask there)."""
+    from shapely import Point
+    opts.via_tent = "both"
+    m = Model(ipc2581.read(ipc_file, opts), opts)
+    m.prepare()
+    v1 = min(m.holes, key=lambda h: (h.x - 15) ** 2 + (h.y - 10) ** 2)    # file (25, 20): drawn opening
+    v2 = min(m.holes, key=lambda h: (h.x - 25) ** 2 + (h.y - 20) ** 2)    # file (35, 30): via padstack pad
+    assert not v1.tent_bot and v2.tent_bot and v1.tent_top and v2.tent_top
+    t = m._tent_region["bottom"]
+    assert t.contains(Point(25, 20)) and not t.intersects(Point(15, 10).buffer(0.5))
+    assert t.area == pytest.approx(0.385, abs=0.01)                          # the 0.7 mm via opening
+    notes = {n.split(":")[0]: n for n in m.prot_notes if n.startswith("tenting ")}
+    assert "1 via opening(s) closed" in notes["tenting bottom"] and "1 inside the opening" in notes["tenting bottom"]
+    assert "2 already covered by the mask data" in notes["tenting top"]

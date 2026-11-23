@@ -90,9 +90,9 @@ SCHEMA = [
     ("sources", "primary", "source", ("odb", "ipc2581"), None, "default",
      "geometry source when both are present: odb or ipc2581 (default: odb, the IPC-2581 then supplies "
      "counterhole types and angles)"),
-    ("sources", "ncdrill", "ncdrill", "ncdrill", None, False,
+    ("sources", "ncdrill", "ncdrill", "ncdrill", None, "default",
      "read NC drill output (counterhole depths and angles): false, true (search NCDRILL/ and beside the "
-     "input) or a path"),
+     "input) or a path (default: read when the fab folder has an NC drill subfolder)"),
     ("sources", "step", "step", "str", None, "default", "ODB++ step to convert (default: pcb)"),
 
     ("stackup", "board_thickness", "board_thickness", "mm", None, "default",
@@ -440,8 +440,8 @@ def config_template(version: str) -> str:
         "# Fab folder layout (any of these may be empty; a single file given on the command line works too):",
         "#   ODB++/     ODB++ product model (.tgz, .tar, .zip or folder): the geometry",
         "#   IPC2581/   IPC-2581 (.cvg or .xml): the geometry, or next to ODB++ the counterhole types and angles",
-        "#   NCDRILL/   NC drill output (.DRR report and drill files): counterhole depths, read with --ncdrill",
-        "#              or [sources] ncdrill = true",
+        "#   NCDRILL/   NC drill output (.DRR report and drill files): counterhole depths; read by default",
+        "#              when present ([sources] ncdrill = false or --no-ncdrill to leave it out)",
         "#   GERBER/    Gerber files (not read yet)",
     ]
     sections: List[str] = []

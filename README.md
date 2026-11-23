@@ -11,9 +11,9 @@ Inputs:
 
 | format | role |
 |---|---|
-| ODB++ (folder, `.tgz`, `.tar`, `.zip`) | geometry (primary source) |
+| ODB++ (folder, `.tgz`, `.tar`, `.zip`) | geometry (primary source); next to IPC-2581 in a fab folder, the IPC-4761 via types |
 | IPC-2581 rev B/C (`.cvg`, `.xml`, zipped) | geometry, or next to ODB++ the counterhole types and angles |
-| NC drill (Altium `.DRR` report and drill files) | counterhole depths and angles (secondary, off by default) |
+| NC drill (Altium `.DRR` report and drill files) | counterhole depths and angles (secondary: read in a fab folder, else with `--ncdrill`) |
 | Gerber | not read yet |
 
 Every reader turns its files into one shared board description
@@ -62,8 +62,16 @@ FAB/
 Nothing depends on this layout: a single file always works, a plain folder is
 searched for ODB++ and IPC-2581 files, and a file given from a fab folder's
 subfolder (`FAB/ODB++/board.tgz`) still uses that fab folder's `config.toml`,
-`IPC2581/` and `NCDRILL/`. With several candidates of one kind the newest is
-used and the report says so.
+`IPC2581/` and `NCDRILL/`. Altium's own output folder names (`ODB++`,
+`IPC-2581`, `NC Drill`, `Gerber`) are recognised as well, so an OutJob's
+output folder can be given as it is. With several candidates of one kind the
+newest is used and the report says so.
+
+A fab folder is read as a whole: the primary source gives the geometry and
+the other sources fill in what it lacks, matched by position (IPC-2581:
+counterhole types and angles; NC drill: exact counterhole depths; ODB++ next
+to an IPC-2581 primary: the IPC-4761 via types). Where two sources describe
+the same hole the report says whether they agree.
 
 Which source gives the geometry: ODB++ when present (`--source ipc2581`, or
 `[sources] primary`, to use the IPC-2581 geometry instead). With both present,
@@ -99,7 +107,7 @@ this order:
 
 1. command line: `--counterhole-top` / `--counterhole-bottom`, then `--counterhole` (both sides)
 2. config: `[counterholes.top]` / `[counterholes.bottom]`, then `[counterholes]`
-3. NC drill report (with `--ncdrill`): exact depth, or angle for countersinks
+3. NC drill report (read in a fab folder, else with `--ncdrill`): exact depth, or angle for countersinks
 4. IPC-2581 padstacks: type and angle (see below)
 5. the counterhole layer itself (ODB++ `ADD_TYPE=COUNTERSINK/COUNTERBORE` or its name)
 6. defaults: counterbore, 90 degrees, depth from the layer span
@@ -130,10 +138,14 @@ Counterholes by hole size, for boards without counterhole layers:
 
 ## Back drills
 
-Altium defines a back drill by its first and last layer and drills "up to,
-but not touching, the last layer": the last layer of the back drill span is
-the must-not-cut layer, in ODB++ and IPC-2581 alike. The drill stops on that
-layer's face; `--backdrill-stub MM` (`[backdrill] stub`) leaves dielectric
+Altium defines a back drill by its layer pair and drills "up to, but not
+touching, the last layer": the last layer of the pair is the must-not-cut
+layer. IPC-2581 names it in the back drill spec. In ODB++ the back drill
+layer is named after the pair (`DRILL_BACKDRILLS_SLOT-GND2`), and that name
+decides: Altium 26 writes the layer's START/END span one layer short of the
+must-not-cut layer (`SLOT..BLANK3`), older exports up to it. Without a pair
+in the name the last layer of the span is taken. The drill stops on the
+must-not-cut layer's face; `--backdrill-stub MM` (`[backdrill] stub`) leaves dielectric
 above it instead. Stub or depth values in the fab data take precedence
 (ODB++ `.backdrill_max_depth`, `.backdrill_max_stub_drill`; IPC-2581
 `MAX_STUB_LENGTH` when it is smaller than the drill depth: Altium writes the
@@ -152,8 +164,9 @@ back drill (Altium lists bottom back drills in the drill pair as well).
 ## Via protection
 
 Applied in this order: fab data (ODB++ `.ipc_via_type_*`, `.via_in_pad`,
-`.is_capped`, `.cu_base`; document layers named Filling, Capping, Plugging or
-Tenting in ODB++ and IPC-2581), then `--via-fill`, `--via-cap`, `--via-tent`,
+`.is_capped`, `.cu_base`; Altium's per-type via drill layers such as
+`DRILL_TYPE_7`; document layers named Filling, Capping, Plugging or Tenting
+in ODB++ and IPC-2581), then `--via-fill`, `--via-cap`, `--via-tent`,
 `--via-plug` (optionally limited by `--via-max-diameter`), then
 `--via-protection` rules such as `7:max=0.3` (fill and cap vias up to 0.3 mm)
 or `1b` (tent all vias both sides).
@@ -164,6 +177,22 @@ IPC-2581. When a layer has such pads only they mark vias; lines, arcs and
 contours on the layer are taken as artwork (footprint drawings, outlines).
 A layer without pads is read primitive by primitive (arc centres, line
 middles, shape centroids). The report says which was used.
+
+Altium's ODB++ also lists the vias of each IPC-4761 type on a drill layer of
+their own (`DRILL_TYPE_7`: type VII, filled and capped), besides the regular
+drill layer. Such a layer gives the type of the holes at its positions and
+adds no second hole. Fab data adds up: a via is filled or capped when any of
+it says so, and the report lists holes one source marks and another does not
+(Altium 26 leaves back drilled type VII vias off the Capping layer).
+
+Tenting closes a via's own opening in the solder mask and nothing else. A
+via inside the opening of a pad or of exposed copper stays open, since the
+mask layer has no mask there and a fab puts no mask on a pad or into an
+opening the artwork asks for (via in pad is plugged, or filled and capped,
+instead). The via openings come from the data (IPC-2581 via padstack pads,
+ODB++ pads with `.pad_usage=via`); without that, an opening counts as the
+via's own when it is round around one via, at most 0.5 mm wider than the
+drill radius, and has no paste.
 
 ## Output
 
@@ -185,7 +214,8 @@ bodies); `tools/section_plot.py` draws a cross-section.
 - IPC-2581 Text features are left out (Altium writes text as contours) and
   Moire primitives are approximated; both are reported.
 - Counterbore floors from IPC-2581 are only known to the layer spacing; use
-  NC drill data or `depth=` for the exact depth.
+  NC drill data (a fab folder with the NC drill output) or `depth=` for the
+  exact depth.
 
 ## Development
 
@@ -218,6 +248,16 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 1.3.0: a fab folder is read as a whole: its NC drill output by default
+  (exact counterbore depths, also for an IPC-2581 primary), and next to an
+  IPC-2581 primary the ODB++ via types; sources describing the same
+  counterhole are cross-checked in the report. Altium's own output folder
+  names are recognised. ODB++ from Altium 26: back drills take the
+  must-not-cut layer from the layer name (the START/END span stops one layer
+  short of it, which gave zero-depth back drills), and the per-type via drill
+  layers (`DRILL_TYPE_7`) give the IPC-4761 type instead of a second copy of
+  every via. Tenting closes only a via's own mask opening; a via inside a pad
+  or exposed copper opening stays open.
 - 1.2.1: IPC-2581 via features: the Filling, Capping (and other via
   protection) markers Altium writes as padstack pads are read, so filled and
   capped vias come from the fab data without flags; drawn artwork on those

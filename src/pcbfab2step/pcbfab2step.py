@@ -76,9 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="IPC-2581 file for counterhole data next to ODB++ (default: from the fab folder or "
                         "named like the ODB++ input beside it; off: none)")
     s.add_argument("--ncdrill", "--nc-drill", dest="ncdrill", nargs="?", const="", default=None, metavar="PATH",
-                   help="read NC drill output (counterhole depths and angles); off by default. Without PATH: "
-                        "the fab folder's NCDRILL/, inside the ODB++ input, else a report named like the input "
-                        "beside it. PATH: a .DRR report, a folder or an archive")
+                   help="read NC drill output (counterhole depths and angles); on for a fab folder with an "
+                        "NC drill subfolder, else off. Without PATH: the fab folder's NCDRILL/, inside the ODB++ "
+                        "input, else a report named like the input beside it. PATH: a .DRR report, a folder or "
+                        "an archive")
     s.add_argument("--no-ncdrill", "--no-nc-drill", dest="ncdrill", action="store_const", const=False,
                    help="do not read NC drill output (overrides config.toml)")
     s.add_argument("--config", default=None, metavar="FILE",
@@ -259,11 +260,20 @@ def convert(args) -> int:
         hints, notes = ipc2581.read_hints(srcs.secondary_ipc)
         board.hints += hints
         board.hint_notes += notes
-    if opts.ncdrill is not None:
+    if srcs.primary == "ipc2581" and srcs.fab and srcs.odb:
+        # the ODB++ of the fab folder has the IPC-4761 via types (per-type drill layers)
+        odb_path = srcs.odb[0] if len(srcs.odb) == 1 else max(srcs.odb, key=os.path.getmtime)
+        board.prot_notes += odbpp.apply_via_types(odb_path, opts, board)
+    nc = opts.ncdrill
+    if nc is None and "ncdrill" not in opts.sources and srcs.fab and srcs.ncdrill_dirs:
+        nc = ""          # a fab folder: its NC drill output is read with the rest
+        board.hint_notes.append(f"NC drill: {os.path.basename(srcs.ncdrill_dirs[0])}/ of the fab folder read "
+                                "(--no-ncdrill or [sources] ncdrill = false to leave it out)")
+    if nc is not None:
         inside = None
         if srcs.primary == "odb":
             inside = ncdrill.pool_from_files("inside the ODB++ input", reader.inside_files())
-        explicit = [opts.ncdrill] if opts.ncdrill else []
+        explicit = [nc] if nc else []
         beside = [os.path.dirname(os.path.abspath(srcs.primary_path.rstrip("/\\")))]
         stem = ncdrill._stem(srcs.primary_path)
         chosen, notes = ncdrill.find_reports(explicit, inside, beside, stem, srcs.ncdrill_dirs)

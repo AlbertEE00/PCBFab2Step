@@ -43,6 +43,9 @@ class Layer:
     image_fn: Optional[Callable[[], object]] = None   # raw 2D image (not clipped)
     points_fn: Optional[Callable[[], list]] = None    # [(x, y, size)] of the features (document layers)
     points_note: str = ""            # what points_fn used (report)
+    # solder mask layers: (openings of everything but the vias, [(x, y, opening)] of each
+    # via's own opening), or None when the data does not say which openings are the vias'
+    mask_split_fn: Optional[Callable[[], Optional[tuple]]] = None
     implicit: bool = False
     # set by the builder
     side: str = ""
@@ -151,6 +154,7 @@ class Backdrill:
     stub: Optional[float] = None     # stub left above the must-not-cut layer, mm
     mnc: str = ""                    # must-not-cut layer, if the data names it
     src: str = ""
+    pair: Optional[tuple] = None     # (surface layer, must-not-cut layer) named by the layer, either order
 
 
 @dataclass
@@ -191,6 +195,8 @@ class CounterholeHint:
     pts: Optional[List[Tuple[float, float]]] = None
     count: Optional[int] = None
     used: int = 0
+    agreed: int = 0                   # holes where a source ahead of it decided and it agrees
+    conflicts: List[str] = field(default_factory=list)   # ... and where it disagrees
 
 
 @dataclass

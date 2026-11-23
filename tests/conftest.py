@@ -106,6 +106,11 @@ IPC_XML = textwrap.dedent("""\
                 <StandardPrimitiveRef id="CIRCLE_2"/></LayerPad>
             </PadStack>
             <PadStack net="GND">
+              <LayerHole name="Via_2" diameter="0.3" platingStatus="VIA" x="35" y="30">
+                <Span fromLayer="TOP" toLayer="BOT"/></LayerHole>
+              <LayerPad layerRef="Bottom Solder"><Location x="35" y="30"/><StandardPrimitiveRef id="CIRCLE_2"/></LayerPad>
+            </PadStack>
+            <PadStack net="GND">
               <LayerPad layerRef="TOP"><Xform rotation="90"/><Location x="20" y="15"/>
                 <StandardPrimitiveRef id="RECT_1"/></LayerPad>
               <LayerPad layerRef="Top Solder"><Xform rotation="90"/><Location x="20" y="15"/>
@@ -201,7 +206,7 @@ def write_odb(root: str) -> str:
     surf = "S P 0\nOB 1 1 I\nOS 29 1\nOS 29 19\nOS 1 19\nOS 1 1\nOE\nSE\n"
     w(f"{S}/layers/top/features", "UNITS=MM\n$0 r800\n" + surf + "P 20 10 0 P 0 0\n")
     w(f"{S}/layers/bot/features", "UNITS=MM\n" + surf)
-    w(f"{S}/layers/top_solder/features", "UNITS=MM\n$0 r1500\nP 20 10 0 P 0 0\n")
+    w(f"{S}/layers/top_solder/features", "UNITS=MM\n$0 r1000\nP 20 10 0 P 0 0\n")
     w(f"{S}/layers/drill/features", "UNITS=MM\n$0 r300\n$1 r1000\nP 20 10 0 P 0 0\nP 10 10 1 P 0 0\n")
     w(f"{S}/layers/drill/tools", "UNITS=MM\nTOOLS {\nNUM=1\nTYPE=VIA\nFINISH_SIZE=300\nDRILL_SIZE=350\n}\n"
       "TOOLS {\nNUM=2\nTYPE=NON_PLATED\nFINISH_SIZE=1000\nDRILL_SIZE=1000\n}\n")

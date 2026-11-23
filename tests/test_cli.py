@@ -82,3 +82,34 @@ def test_odb_folder_kinds(tmp_path, odb_job):
     assert kind_of(str(fab)) == "folder"
     s = choose(discover([str(fab)]), None, None)
     assert s.primary == "odb" and os.path.basename(s.primary_path) == "ODB++"
+
+
+def test_fab_folder_reads_nc_drill(tmp_path, odb_job, capsys):
+    """A fab folder with NC drill output: its .DRR depth is used without --ncdrill."""
+    fab = tmp_path / "FAB"
+    main(["init", str(fab)])
+    shutil.copytree(odb_job, fab / "ODB++" / "testjob")
+    (fab / "NCDRILL" / "testjob.DRR").write_text(
+        "CounterHole : Counterholes Top\nASCII RoundHoles File : testjob.TX2\n\n"
+        "Tool       Hole Size     Hole Tolerance   Hole Type   Hole Count   Plated   Tool Travel     Depth     Angle\n"
+        "T1      2mm (79mil)                       Round       1            NPTH     0mm (0inch)     0.3mm (11.811mil)   0\n")
+    (fab / "NCDRILL" / "testjob.TX2").write_text("M48\n;FILE_FORMAT=4:4\nMETRIC,LZ\nT01F00S00C2.0000\n%\nT01\n"
+                                                 "X0010Y0010\nM30\n")
+    assert main(["info", str(fab)]) == 0
+    out = capsys.readouterr().out
+    assert "NCDRILL/ of the fab folder read" in out and "counterbore 2.000 mm from top, depth 0.3000 mm" in out
+    assert main(["info", str(fab), "--no-ncdrill"]) == 0
+    out = capsys.readouterr().out
+    assert "of the fab folder read" not in out and "depth 0.3000 mm" not in out
+
+
+def test_altium_output_folder_names(tmp_path, ipc_file, odb_job):
+    """Altium OutJob folders: 'ODB++/odb' (extracted job), 'IPC-2581', 'NC Drill'."""
+    fab = tmp_path / "Outputs"
+    shutil.copytree(odb_job, fab / "ODB++" / "odb")
+    (fab / "IPC-2581").mkdir()
+    shutil.copy(ipc_file, fab / "IPC-2581" / "board.cvg")
+    (fab / "NC Drill").mkdir()
+    s = choose(discover([str(fab)]), None, None)
+    assert s.primary == "odb" and s.primary_path.endswith("odb") and s.secondary_ipc.endswith("board.cvg")
+    assert s.ncdrill_dirs and s.ncdrill_dirs[0].endswith("NC Drill")

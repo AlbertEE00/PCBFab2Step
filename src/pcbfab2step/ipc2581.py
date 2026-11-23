@@ -487,9 +487,21 @@ class IpcReader:
         for lf in d.step.findall("LayerFeature"):
             self.features[lf.get("layerRef", "")].append(lf)
         self.pads: Dict[str, List[ET.Element]] = defaultdict(list)
+        # via padstacks (a LayerHole with platingStatus VIA, no component pin): their pads on
+        # a solder mask layer are the vias' own openings (a via tented in the data has none)
+        self._via_lp = set()
+        self._n_via_ps = 0
         for ps in d.step.findall("PadStack"):
+            via = any((lh.get("platingStatus") or "").upper() == "VIA" for lh in ps.findall("LayerHole")) \
+                and ps.find(".//PinRef") is None
+            self._n_via_ps += via
             for lp in ps.findall("LayerPad"):
                 self.pads[lp.get("layerRef", "")].append(lp)
+                if via:
+                    self._via_lp.add(id(lp))
+        self._via_sets = any(_is_via_set(st) for lfs in self.features.values() for lf in lfs
+                             for st in lf.findall("Set"))
+        self._sets_img: Dict[tuple, object] = {}
         self._stackup()
 
     # .. stackup ............................................................
@@ -576,6 +588,8 @@ class IpcReader:
                 L.empty = not self._has_geometry(name)
             if kind == "doc":
                 L.points_fn = (lambda L=L: self.doc_points(L))
+            if kind == "mask":
+                L.mask_split_fn = (lambda nm=name: self.mask_split(nm))
             out.append(L)
         return out
 
@@ -589,13 +603,19 @@ class IpcReader:
         return False
 
     # .. images ..............................................................
-    def image(self, name: str):
-        """Layer image: the feature sets in order (NEGATIVE sets subtract),
-        then the padstack pads on this layer."""
+    def _sets_image(self, name: str, skip_vias: bool = False):
+        """The feature sets of a layer in order (NEGATIVE sets subtract);
+        skip_vias leaves out the sets with padUsage VIA."""
+        key = (name, skip_vias)
+        acc = self._sets_img.get(key)
+        if acc is not None:
+            return acc
         acc = EMPTY
         batch, pol = [], "P"
         for lf in self.features.get(name, ()):
             for s in lf.findall("Set"):
+                if skip_vias and _is_via_set(s):
+                    continue
                 p = "N" if (s.get("polarity") or "POSITIVE").upper().startswith("NEG") else "P"
                 parts = self.geo.set_geometry(s)
                 if not parts:
@@ -607,10 +627,42 @@ class IpcReader:
                 batch.extend(parts)
         if batch:
             acc = _apply(acc, batch, pol)
+        self._sets_img[key] = acc
+        return acc
+
+    def image(self, name: str):
+        """Layer image: the feature sets, then the padstack pads on this layer."""
+        acc = self._sets_image(name)
         pads = [self.geo.placed(lp) for lp in self.pads.get(name, ())]
         if pads:
             acc = union_all([acc] + pads)
         return acc
+
+    def mask_split(self, name: str):
+        """Solder mask layer: (openings of everything but the vias, [(x, y, opening)]
+        of the vias' own openings: the pads of the via padstacks and the sets with
+        padUsage VIA). None when the file has neither, so it does not say which
+        openings are vias."""
+        if not (self._n_via_ps or self._via_sets):
+            return None
+        other, own = [self._sets_image(name, skip_vias=True)], []
+        for lf in self.features.get(name, ()):
+            for s in lf.findall("Set"):
+                if _is_via_set(s):
+                    for g in self.geo.set_geometry(s) or ():
+                        if g is not None and not g.is_empty:
+                            c = g.centroid
+                            own.append((c.x, c.y, g))
+        for lp in self.pads.get(name, ()):
+            g = self.geo.placed(lp)
+            if g is None or g.is_empty:
+                continue
+            if id(lp) in self._via_lp:
+                c = g.centroid
+                own.append((c.x, c.y, g))
+            else:
+                other.append(g)
+        return union_all(other), own
 
     def doc_points(self, L: Layer):
         """Markers of a document layer (Filling, Capping, ...). Altium writes a
@@ -943,6 +995,12 @@ class IpcReader:
         if self.doc.unsupported:
             warn("IPC-2581 features left out or approximated: " +
                  ", ".join(f"{k} x{n}" for k, n in sorted(self.doc.unsupported.items())))
+
+
+def _is_via_set(s) -> bool:
+    """A feature set of via pads (padUsage VIA), positive."""
+    return (s.get("padUsage") or "").upper() == "VIA" and \
+        not (s.get("polarity") or "POSITIVE").upper().startswith("NEG")
 
 
 def _apply(acc, batch, pol):

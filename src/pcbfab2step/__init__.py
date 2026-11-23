@@ -3,4 +3,4 @@
 The version continues the odb2step line (1.0.0 to 1.1.0, ODB++ only), which
 this package replaces."""
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"

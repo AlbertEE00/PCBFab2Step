@@ -289,6 +289,27 @@ def attr_float(attrs: Dict[str, str], key: str) -> Optional[float]:
         return None
 
 
+# Altium writes the vias of each IPC-4761 type to a drill layer of their own too
+# (DRILL_TYPE_7: the type VII vias, also on the regular drill layer)
+_VIA_TYPE_RE = re.compile(r"^(?:drill|via)s?_?type_?([1-7]|iv|v?i{1,3}|v)([ab])?$", re.I)
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7}
+IPC_TYPE_TEXT = {1: "tented", 2: "tented and covered", 3: "plugged", 4: "plugged and covered", 5: "filled",
+                 6: "filled and covered", 7: "filled and capped"}
+
+
+def via_type_layer(name: str) -> Optional[Tuple[int, str]]:
+    """'DRILL_TYPE_7' -> (7, ''), 'drill_type_1b' -> (1, 'b'), else None."""
+    m = _VIA_TYPE_RE.match(name.strip())
+    if not m:
+        return None
+    t = m.group(1).lower()
+    return (int(t) if t.isdigit() else _ROMAN[t]), (m.group(2) or "").lower()
+
+
+def _roman(n: int) -> str:
+    return {v: k for k, v in _ROMAN.items()}[n].upper()
+
+
 # ODB++ option attributes are stored in feature files as the option index
 OPTION_ATTRS = {
     ".drill": ["plated", "non_plated", "via"],
@@ -1375,6 +1396,7 @@ class OdbReader:
         self.R = Renderer(job, self.units)
         self._ff: Dict[tuple, FeatureFile] = {}
         self._own: Dict[tuple, object] = {}
+        self._type_holes: list = []          # (hole, layer) of the per-type via drill layers
         self._tools: Dict[tuple, list] = {}
 
     # .. inputs ................................................................
@@ -1418,6 +1440,35 @@ class OdbReader:
                 parts.append(m_apply(M, g))
         return union_all(parts)
 
+    def mask_split(self, L: Layer):
+        """Solder mask layer: (openings of everything but the vias, [(x, y, opening)]
+        of the vias' own openings, the pads with .pad_usage=via). None when the
+        layer's pads carry no .pad_usage, so the data does not say which are vias."""
+        def is_via(rec):
+            return rec.kind == "P" and not rec.pol.startswith("N") and (rec.attrs or {}).get(".pad_usage") == "via"
+        known = False
+        other, own = [], []
+        for s, M in self.instances:
+            ff = self.ff(s, L.key)
+            if not ff.records:
+                continue
+            known = known or any(r.kind == "P" and ".pad_usage" in (r.attrs or {}) for r in ff.records)
+            g = self.R.render(ff, select=lambda r: not is_via(r))
+            if not g.is_empty:
+                other.append(m_apply(M, g))
+            for rec in ff.records:
+                if not is_via(rec):
+                    continue
+                gv = self.R.feature_geom(rec, ff)
+                if gv is None or gv.is_empty:
+                    continue
+                gv = m_apply(M, gv)
+                c = gv.centroid
+                own.append((c.x, c.y, gv))
+        if not known:
+            return None
+        return union_all(other), own
+
     def inside_files(self) -> Dict[str, object]:
         """Every file inside the ODB++ input: {name: bytes or path} (NC drill search)."""
         return dict(self.job.files) if self.job.files else dict(self.job.dir_index)
@@ -1447,6 +1498,8 @@ class OdbReader:
                 L.df = attr_float(L.attrs, ".loss_tangent")
                 L.material = L.dielectric_name or L.attrs.get(".comment", "")
             elif L.kind in ("mask", "silk", "finish", "paste"):
+                if L.kind == "mask":
+                    L.mask_split_fn = (lambda L=L: self.mask_split(L))
                 v = layer_dielectric_from_attrs(L.attrs)
                 if v is not None:
                     L.t_data, L.t_data_src = v, ".layer_dielectric"
@@ -1470,6 +1523,8 @@ class OdbReader:
     def _drill_role(L: Layer) -> str:
         toks = name_tokens(L.name)
         add = L.add_type
+        if not add and via_type_layer(L.name):
+            return "viatype"
         if add == "BACKDRILL" or toks & {"backdrill", "backdrills", "bd"}:
             return "backdrill"
         if add in ("COUNTERHOLE", "COUNTERBORE", "COUNTERSINK") or toks & COUNTER_TOKENS:
@@ -1547,6 +1602,7 @@ class OdbReader:
             npth_name = bool(toks & {"npth", "nonplated", "unplated", "np"}) or ("non" in toks and "plated" in toks)
             ctype, csrc = self._layer_counter_type(L) if role == "counter" else ("", "")
             dattr = attr_float(L.attrs, ".backdrill_max_depth") if role == "backdrill" else None
+            pair = self._layer_pair(L) if role == "backdrill" else None
             for s, M in self.instances:
                 ff = self.ff(s, L.key)
                 tools = self.tools(s, L.key)
@@ -1563,7 +1619,7 @@ class OdbReader:
                         continue
                     if role == "backdrill":
                         b = Backdrill(x=px, y=py, d=d, layer=L.name, start=L.start, end=L.end, dir_hint=dh,
-                                      src=f"ODB++ layer {L.name}")
+                                      src=f"ODB++ layer {L.name}", pair=pair)
                         if dattr and dattr > 0:
                             b.depth = _len_mm(dattr, L.attrs.get("units", units), "mil_micron")
                             b.src = f"ODB++ {L.name} .backdrill_max_depth"
@@ -1600,7 +1656,59 @@ class OdbReader:
                              end=L.end, laser=laser, dir_hint=dh, r_drill_data=r_dd, geom_fin=geom, attrs=attrs)
                     if str(L.attrs.get(".cu_base", "no")).lower() in ("yes", "y", "true", "1") and plated:
                         h.fill, h.prot_src = "copper", ".cu_base"
+                    if role == "viatype":
+                        self._type_holes.append((h, L.name))
+                        continue
                     board.holes.append(h)
+
+    def _layer_pair(self, L: Layer) -> Optional[Tuple[str, str]]:
+        """Altium names a back drill layer after its layer pair, the drilled
+        surface layer and the must-not-cut layer (DRILL_BACKDRILLS_SLOT-GND2),
+        while its START/END span may stop one layer short of the must-not-cut
+        layer (Altium 26). -> the two copper layer names, or None."""
+        cu = [x.name for x in self.layers if x.kind == "copper" and x.context == "BOARD"]
+        up = L.name.upper()
+        best = None
+        for a in cu:
+            for b in cu:
+                if a == b or not up.endswith(f"_{a}-{b}".upper()):
+                    continue
+                if best is None or len(a + b) > len(best[0] + best[1]):
+                    best = (a, b)
+        return best
+
+    def _via_type_layers(self, board: Board):
+        """IPC-4761 via types from Altium's per-type drill layers (DRILL_TYPE_7):
+        the type goes to the plated hole of the other drill layers at each
+        position; a hole that is only on such a layer is added. 'a' types are
+        single-sided and taken as the top side (the layer does not say)."""
+        if not self._type_holes:
+            return
+        fm, pd = self.opts.fill_material, self.opts.plug_depth
+        idx = {}
+        for h in board.holes:
+            if h.plated:
+                idx.setdefault((round(h.x, 2), round(h.y, 2)), []).append(h)
+        stats: Dict[str, list] = {}
+        for h_new, lname in self._type_holes:
+            n, ab = via_type_layer(lname)
+            top, bot = (n, n) if n in (5, 7) or ab != "a" else (n, 5 if n == 6 else 0)
+            found = [h for k in ((round(h_new.x, 2), round(h_new.y, 2)),) for h in idx.get(k, ())
+                     if math.hypot(h.x - h_new.x, h.y - h_new.y) <= 0.01 and abs(h.r_fin - h_new.r_fin) <= 0.005]
+            st = stats.setdefault(lname, [0, 0, n, ab])
+            if not found:
+                board.holes.append(h_new)
+                found = [h_new]
+                st[1] += 1
+            for h in found:
+                apply_ipc(h, top, bot, "copper" if h.fill == "copper" else fm, pd,
+                          f"ODB++ layer {lname} (IPC-4761 type {_roman(n)}{ab})")
+            st[0] += 1
+        for lname, (k, added, n, ab) in stats.items():
+            board.prot_notes.append(
+                f"layer {lname}: IPC-4761 type {_roman(n)}{ab} ({IPC_TYPE_TEXT[n]}"
+                + (", single-sided, taken as top" if ab == "a" and n not in (5, 7) else "") + f") for {k} hole(s)"
+                + (f", {added} of them only on this layer" if added else ""))
 
     def _attr_protection(self, board: Board):
         """IPC-4761 via protection from ODB++ feature attributes."""
@@ -1649,6 +1757,7 @@ class OdbReader:
                 break
         self._drills(board)
         self._attr_protection(board)
+        self._via_type_layers(board)
         for L in self.layers:
             if L.context == "BOARD" and L.kind == "rout":
                 board.routs.append(RoutCut(region=(lambda L=L: self.raw_image(L)), layer=L.name,
@@ -1666,3 +1775,43 @@ class OdbReader:
 def read(path: str, opts) -> Board:
     """ODB++ product model (folder, .tgz/.tar or .zip) -> Board."""
     return OdbReader(path, opts).read()
+
+
+def apply_via_types(path: str, opts, board: Board) -> List[str]:
+    """ODB++ next to an IPC-2581 primary: the IPC-4761 via types of Altium's
+    per-type drill layers (DRILL_TYPE_7) for the board's plated holes at the
+    same positions. IPC-2581 has only the Filling/Capping markers."""
+    r = OdbReader(path, opts)
+    r.read()
+    if not r._type_holes:
+        return []
+    fm, pd = opts.fill_material, opts.plug_depth
+    holes = [h for h in board.holes if h.plated]
+    idx: Dict[tuple, list] = {}
+    for h in holes:
+        idx.setdefault((round(h.x, 1), round(h.y, 1)), []).append(h)
+
+    def find(x, y):
+        out = []
+        for i in (-0.1, 0.0, 0.1):
+            for j in (-0.1, 0.0, 0.1):
+                for h in idx.get((round(x + i, 1), round(y + j, 1)), ()):
+                    if math.hypot(h.x - x, h.y - y) <= 0.01 and h not in out:
+                        out.append(h)
+        return out
+    stats: Dict[str, list] = {}
+    for hn, lname in r._type_holes:
+        n, ab = via_type_layer(lname)
+        top, bot = (n, n) if n in (5, 7) or ab != "a" else (n, 5 if n == 6 else 0)
+        st = stats.setdefault(lname, [0, 0, n, ab])
+        found = [h for h in find(hn.x, hn.y) if abs(h.r_fin - hn.r_fin) <= 0.005]
+        if not found:
+            st[1] += 1
+        for h in found:
+            apply_ipc(h, top, bot, "copper" if h.fill == "copper" else fm, pd,
+                      f"ODB++ layer {lname} (IPC-4761 type {_roman(n)}{ab})")
+            st[0] += 1
+    label = os.path.basename(path.rstrip("/\\"))
+    return [f"ODB++ {label}, layer {lname}: IPC-4761 type {_roman(n)}{ab} ({IPC_TYPE_TEXT[n]}) for {k} hole(s)"
+            + (f"; {miss} position(s) without a plated hole here" if miss else "")
+            for lname, (k, miss, n, ab) in stats.items()]

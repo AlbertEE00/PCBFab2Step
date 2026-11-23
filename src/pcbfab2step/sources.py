@@ -124,8 +124,9 @@ def _subdir(folder: str, kind: str) -> Optional[str]:
     return None
 
 
-def _scan(folder: str, kind: str) -> List[str]:
-    """Inputs of one kind directly in a folder."""
+def _scan(folder: str, kind: str, inner: bool = False) -> List[str]:
+    """Inputs of one kind directly in a folder (inner: the folder is the fab
+    folder's subfolder for that kind, where an extracted job may be called 'odb')."""
     out = []
     try:
         entries = sorted(os.listdir(folder))
@@ -135,7 +136,7 @@ def _scan(folder: str, kind: str) -> List[str]:
         p = os.path.join(folder, e)
         if os.path.isdir(p):
             # fab subfolders are searched on their own
-            if kind == "odb" and e.lower() not in ALL_SUBDIRS and _odb_job_dir(p):
+            if kind == "odb" and (inner or e.lower() not in ALL_SUBDIRS) and _odb_job_dir(p):
                 out.append(p)
             continue
         low = e.lower()
@@ -195,7 +196,7 @@ def discover(inputs: List[str], config: Optional[str] = None, no_config: bool = 
             if sub and kind == "odb" and _is_odb_root(sub):
                 found = [sub]                     # job extracted straight into ODB++/
             else:
-                found = (_scan(sub, kind) if sub else []) + _scan(f, kind)
+                found = (_scan(sub, kind, inner=True) if sub else []) + _scan(f, kind)
             if kind == "odb":
                 s.odb = found
             else:

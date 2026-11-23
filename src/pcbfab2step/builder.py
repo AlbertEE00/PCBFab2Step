@@ -304,6 +304,7 @@ class Model:
         self.svg: Dict[str, object] = {}
         self.B = EMPTY
         self._unaligned = set()
+        self._tent_region: Dict[str, object] = {}
 
     # .. images ...............................................................
     def image(self, L: Layer):
@@ -332,6 +333,7 @@ class Model:
         self._via_rules()
         self._counter_and_backdrills()
         self._resolve_caps()
+        self._resolve_tents()
         self._build_cuts()
 
     def _surface(self, side):
@@ -437,6 +439,9 @@ class Model:
         idx = PointIndex(0.01)
         for h in plated:
             idx.add(h.x, h.y, h)
+        # what other data (via type layers, attributes) already says, to compare with the markers
+        pre = {"fill": {id(h): h.prot_src for h in plated if h.fill},
+               "cap": {id(h): h.prot_src for h in plated if h.cap_top or h.cap_bot}}
         for L in self.layers:
             if L.kind in ("copper", "dielectric", "drill", "rout", "silk", "paste") or L.points_fn is None:
                 continue
@@ -466,8 +471,15 @@ class Model:
                             setattr(h, f"tent_{'top' if sd == 'top' else 'bot'}", True)
                     h.prot_src = (h.prot_src + ", " if h.prot_src else "") + f"layer {L.name}"
             if hit:
+                extra = ""
+                if role in pre:
+                    miss = [src for k, src in pre[role].items() if k not in hit]
+                    if miss:
+                        srcs = sorted({m for m in miss if m})
+                        extra = (f"; {len(miss)} other hole(s) {'filled' if role == 'fill' else 'capped'} by "
+                                 f"{', '.join(srcs) or 'other data'} have no marker here")
                 self.prot_notes.append(f"layer {L.name}: {role} applied to {len(hit)} hole(s) ({'/'.join(sides)})"
-                                       + (f" [{L.points_note}]" if L.points_note else ""))
+                                       + (f" [{L.points_note}]" if L.points_note else "") + extra)
             elif pts:
                 warn(f"via-protection layer {L.name} ({role}) matched no plated hole")
 
@@ -600,7 +612,8 @@ class Model:
                 any_added = True
         return idx if any_added else None
 
-    def _match_hint(self, c, side, hint_idx) -> Optional[CounterholeHint]:
+    def _match_hints(self, c, side, hint_idx) -> List[CounterholeHint]:
+        """The hints for one counterhole, first source first (NC drill, then IPC-2581)."""
         order = {id(q): i for i, q in enumerate(self.board.hints)}
 
         def fits(q):
@@ -608,11 +621,25 @@ class Model:
         if hint_idx is not None:
             hit = sorted((q for q in hint_idx.find_all(c.x, c.y) if fits(q)), key=lambda q: order.get(id(q), 0))
             if hit:
-                return hit[0]
+                return hit
         pool = [q for q in self.board.hints if fits(q) and (q.pts is None or id(q) in self._unaligned)]
         if pool and len({(q.type, q.depth, q.angle, q.floor_layer) for q in pool}) == 1:
-            return pool[0]
-        return None
+            return pool[:1]
+        return []
+
+    @staticmethod
+    def _check_hint(q, ctype, ang, depth) -> str:
+        """'' when a later source agrees with the result, else what it says."""
+        if q.type and q.type != ctype:
+            return f"{q.type}" + (f" {q.angle:g} deg" if q.type == "countersink" and q.angle else "")
+        if ctype == "countersink" and q.angle and ang and abs(q.angle - ang) > 0.5:
+            return f"angle {q.angle:g} deg"
+        if ctype == "counterbore":
+            if q.depth is not None and abs(q.depth - depth) > 0.01:
+                return f"depth {q.depth:g} mm"
+            if q.depth is None and q.depth_range and not (q.depth_range[0] - 0.01 <= depth <= q.depth_range[1] + 0.01):
+                return f"depth {q.depth_range[0]:.4f}..{q.depth_range[1]:.4f} mm"
+        return ""
 
     def _add_counterbore(self, x, y, r, side, z_end, holes, kind, geom=None):
         surf = self._surface(side)
@@ -755,10 +782,20 @@ class Model:
             h = idx.find(c.x, c.y)
             if h is not None and (id(h), side) in ruled:
                 continue
-            hint = self._match_hint(c, side, hint_idx)
+            hints = self._match_hints(c, side, hint_idx)
+            hint = hints[0] if hints else None
             if hint is not None:
                 hint.used += 1
             ctype, ang, z_end, why, rng = self._resolve_counter(c, side, top_i, bot_i, hint)
+            for q in hints[1:]:               # the other sources: cross-check
+                if q.src == hint.src:
+                    continue
+                d_now = abs(self._surface(side) - z_end) if z_end is not None else 0.0
+                bad = self._check_hint(q, ctype, ang, d_now)
+                if bad:
+                    q.conflicts.append(bad)
+                else:
+                    q.agreed += 1
             r = c.d / 2.0
             if ctype == "countersink":
                 depth = self._add_countersink(c.x, c.y, r, ang, side, h)
@@ -789,10 +826,19 @@ class Model:
                                    + (f"\n    {srcs}" if srcs else ""))
         for q in self.board.hints:
             what = f"{q.src} ({q.type or 'counterhole'} {q.d:.3f} mm" + (f" from {q.side})" if q.side else ")")
-            if q.used == 0:
+            if q.agreed:
+                rng = (f", floor between {q.depth_range[0]:.4f} and {q.depth_range[1]:.4f} mm deep"
+                       if q.depth_range and q.depth is None else "")
+                self.hole_notes.append(f"{what}: agrees for {q.agreed} hole(s){rng}")
+            if q.conflicts:
+                c0 = Counter(q.conflicts).most_common(1)[0][0]
+                self.hole_notes.append(f"{what}: disagrees for {len(q.conflicts)} hole(s) (it says {c0}); "
+                                       "the source listed first decides")
+            seen = q.used + q.agreed + len(q.conflicts)
+            if seen == 0:
                 self.hole_notes.append(f"{what}: not matched to a counterhole")
-            elif q.count and q.used != q.count:
-                self.hole_notes.append(f"{what}: lists {q.count} hole(s), {q.used} matched")
+            elif q.count and seen != q.count:
+                self.hole_notes.append(f"{what}: lists {q.count} hole(s), {seen} matched")
         if assumed["type"] or assumed["angle"]:
             what = []
             if assumed["type"]:
@@ -833,13 +879,23 @@ class Model:
                 mnc = ""
             else:
                 mi = self.stk.index(b.mnc) if b.mnc else None
+                named = ""
+                if mi is None and b.pair:
+                    # the layer's own name gives the pair: the layer farther from the drilled surface
+                    ids = [i for i in (self.stk.index(n) for n in b.pair) if i is not None]
+                    if len(ids) == 2:
+                        mi = max(ids) if side == "top" else min(ids)
+                        far = bot_i if side == "top" else top_i
+                        named = " (named by the layer" + ("" if mi == far else
+                                                          f"; its span ends at {st[far].name}") + ")"
                 if mi is None:
                     mi = bot_i if side == "top" else top_i
                 M = st[mi]
                 mnc = M.name
                 z_end = min(surf, M.z1 + stub) if side == "top" else max(surf, M.z0 - stub)
-                how = (f"up to the must-not-cut layer {mnc}" if stub <= 0 else
-                       f"stopping {stub * 1000:g} um short of the must-not-cut layer {mnc} (stub from {stub_src})")
+                how = (f"up to the must-not-cut layer {mnc}{named}" if stub <= 0 else
+                       f"stopping {stub * 1000:g} um short of the must-not-cut layer {mnc}{named} "
+                       f"(stub from {stub_src})")
             filled = [h for h in holes if h.fill]
             depth = self._add_backdrill(b.x, b.y, r, side, z_end, holes)
             if filled:
@@ -980,26 +1036,97 @@ class Model:
                 holes_open.append(g)
         return union_all(holes), union_all(pierce), union_all(holes_open)
 
-    def _tent_regions(self, side, openings):
-        hs = [h for h in self.holes if (h.tent_top if side == "top" else h.tent_bot)]
-        if not hs:
-            return EMPTY
+    def _resolve_tents(self):
+        """Tenting closes a via's own opening in the solder mask. A via inside
+        the opening of a pad or of exposed copper stays open: the mask layer has
+        no mask there, and a fab puts no mask on a pad or into an opening the
+        artwork asks for (it plugs, fills or caps such a via instead)."""
+        self._tent_region = {}
+        n = len(self.stk.stack)
+        for side in ("top", "bottom"):
+            flag = "tent_top" if side == "top" else "tent_bot"
+            for h in self.holes:              # a side the hole does not reach has nothing to tent
+                if getattr(h, flag) and (h.top_idx != 0 if side == "top" else h.bot_idx != n - 1):
+                    setattr(h, flag, False)
+            hs = [h for h in self.holes if h.plated and getattr(h, flag)]
+            masks = [] if self.opts.no_mask else self.stk.coats[side].get("mask", [])
+            if hs and not masks:
+                for h in hs:
+                    setattr(h, flag, False)
+                self.prot_notes.append(f"tenting {side}: {len(hs)} tented hole(s) left open: no solder mask "
+                                       "on this side")
+            if not hs or not masks:
+                continue
+            splits = [None if (L.mask_split_fn is None or L.polarity.upper().startswith("NEG"))
+                      else L.mask_split_fn() for L in masks]
+            if all(sp is not None for sp in splits):
+                region, left_open, closed, how = self._tents_from_data(hs, splits)
+            else:
+                region, left_open, closed, how = self._tents_by_shape(side, hs, masks)
+            self._tent_region[side] = region
+            for h in left_open:
+                setattr(h, flag, False)
+            covered = len(hs) - len(left_open) - closed
+            parts = []
+            if closed:
+                parts.append(f"{closed} via opening(s) closed")
+            if covered:
+                parts.append(f"{covered} already covered by the mask data")
+            if left_open:
+                parts.append(f"{len(left_open)} inside the opening of a pad or exposed copper left open "
+                             "(no mask there in the data)")
+            self.prot_notes.append(f"tenting {side}: {len(hs)} tented hole(s): " + "; ".join(parts) + f" [{how}]")
+
+    def _tents_from_data(self, hs, splits):
+        """The data marks the vias' own openings: close those of the tented
+        vias, minus every other opening (pads, exposed copper, untented vias)."""
+        other = clean(ginter(union_all([sp[0] for sp in splits]), self.B))
+        idx = self._hole_index(plated_only=True)
+        tented = {id(h) for h in hs}
+        closing, staying, closed = [], [], set()
+        for _, own in splits:
+            for x, y, g in own:
+                h = idx.find(x, y)
+                if h is not None and id(h) in tented:
+                    closing.append(g)
+                    closed.add(id(h))
+                else:
+                    staying.append(g)
+        shapely.prepare(other)
+        left_open = [h for h in hs if not other.is_empty and shapely.contains_xy(other, h.x, h.y)]
+        region = clean(ginter(gdiff(union_all(closing), union_all([other] + staying)), self.B)) \
+            if closing else EMPTY
+        n_closed = len(closed - {id(h) for h in left_open})
+        return region, left_open, n_closed, "via openings from the fab data"
+
+    def _tents_by_shape(self, side, hs, masks):
+        """The data does not mark via openings: an opening is the via's own when
+        it is a disc around the via, at most 0.5 mm wider than the drill radius,
+        with no other hole in it and no paste on it (a round pad around a via
+        in pad has paste)."""
+        openings = union_all(self.image(L) for L in masks)
         polys = list(iter_polys(openings))
-        tree = shapely.STRtree(polys) if polys else None
-        out = []
+        if not polys:
+            return EMPTY, [], 0, "no openings in the mask data"
+        tree = shapely.STRtree(polys)
+        paste = union_all(self.image(L) for L in self.stk.coats[side].get("paste", []))
+        pts = [h for h in self.holes if h.plated]
+        ptree = shapely.STRtree([Point(h.x, h.y) for h in pts])
+        out, left_open = [], []
         for h in hs:
             p = Point(h.x, h.y)
-            done = False
-            if tree is not None:
-                for i in tree.query(p):
-                    poly = polys[int(i)]
-                    if poly.contains(p) and poly.area <= 30 * math.pi * h.r_drill ** 2:
-                        out.append(Polygon(poly.exterior))
-                        done = True
-                        break
-            if not done:
-                out.append(circle(h.x, h.y, h.r_drill + 0.05))
-        return union_all(out)
+            P = next((polys[int(i)] for i in tree.query(p) if polys[int(i)].contains(p)), None)
+            if P is None:
+                continue
+            r_max = max(math.hypot(x - h.x, y - h.y) for x, y in P.exterior.coords)
+            own = (r_max <= h.r_drill + 0.5 and P.area >= 0.8 * math.pi * r_max ** 2
+                   and len(ptree.query(P, predicate="contains")) <= 1
+                   and (paste.is_empty or not paste.contains(p)))
+            if own:
+                out.append(Polygon(P.exterior))
+            else:
+                left_open.append(h)
+        return union_all(out), left_open, len(out), "via openings by shape: round, around one via, no paste"
 
     def _comp(self, name, color, solids, layer=None):
         if solids:
@@ -1091,7 +1218,7 @@ class Model:
         if masks:
             openings = union_all(self.image(L) for L in masks)
             M = gdiff(self.B, openings)
-            tents = self._tent_regions(side, openings)
+            tents = self._tent_region.get(side, EMPTY)
             if not tents.is_empty:
                 M = union_all([M, ginter(tents, self.B)])
             t_m = max(L.t for L in masks)
