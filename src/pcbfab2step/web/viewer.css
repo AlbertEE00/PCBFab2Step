@@ -1,0 +1,191 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+   Copyright (C) 2026 Albert van Zyl
+
+   PCBFab2Step: the viewer's chrome, shared by `--view` and the GUI.
+   Graphite and laminate tones that leave the colour to the board; ENIG gold
+   marks what is active. Bahnschrift (DIN, the lettering of technical
+   drawings) on Windows, Barlow elsewhere. */
+
+:root {
+  color-scheme: dark light;
+  --ui: "Bahnschrift", "Barlow", "DIN Alternate", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", ui-monospace, monospace;
+
+  --bg: #1d2126;
+  --panel: #24292f;
+  --panel-2: #2b3138;
+  --line: #363d45;
+  --ink: #e7eaee;
+  --ink-2: #9ba5af;
+  --ink-3: #6f7983;
+  --gold: #e2b54a;
+  --gold-ink: #1d1a12;
+  --gold-line: #e2b54a;
+  --view-top: #303843;
+  --view-bot: #16191d;
+  --bar: rgba(36, 41, 47, 0.86);
+  --ok: #7cc49a;
+  --warn: #e6a23c;
+  --err: #ef7c74;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #e9ecef;
+    --panel: #f7f8f9;
+    --panel-2: #eef1f3;
+    --line: #d3d9df;
+    --ink: #1a1f24;
+    --ink-2: #56606b;
+    --ink-3: #8a939c;
+    --gold: #dcaa3c;
+    --gold-ink: #1d1a12;
+    --gold-line: #9a6b00;
+    --view-top: #f5f7f9;
+    --view-bot: #d5dbe1;
+    --bar: rgba(247, 248, 249, 0.88);
+    --ok: #2f8a57;
+    --warn: #a86400;
+    --err: #c0392b;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 13px/1.4 var(--ui);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select { font: inherit; color: inherit; }
+
+:focus-visible { outline: 2px solid var(--gold-line); outline-offset: 1px; }
+
+/* ---- viewport ---------------------------------------------------------- */
+
+.viewport {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--view-top), var(--view-bot));
+  min-width: 0;
+  min-height: 0;
+}
+
+.viewport .pcb-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+.viewport .caption {
+  position: absolute;
+  left: 18px;
+  top: 14px;
+  pointer-events: none;
+  max-width: calc(100% - 300px);
+}
+
+.caption h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.005em; line-height: 1.25; }
+.caption p { margin: 2px 0 0; color: var(--ink-2); font-size: 12px; }
+
+.viewport .picked {
+  position: absolute;
+  left: 18px;
+  bottom: 70px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bar);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  pointer-events: none;
+}
+.picked b { font-weight: 600; }
+.picked span { color: var(--ink-2); margin-left: 8px; }
+
+.viewport .busy {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+  pointer-events: none;
+}
+
+/* ---- floating tool bar ------------------------------------------------- */
+
+.toolbar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px;
+  border-radius: 10px;
+  background: var(--bar);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+}
+
+.seg { display: flex; align-items: center; gap: 2px; }
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 0; }
+
+.tb {
+  border: 0;
+  background: transparent;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--ink);
+}
+.tb:hover { background: var(--panel-2); }
+.tb[aria-pressed="true"] { background: var(--gold); color: var(--gold-ink); }
+.tb:disabled { color: var(--ink-3); cursor: default; background: transparent; }
+
+.toolbar input[type="range"] { width: 120px; accent-color: var(--gold); }
+.toolbar label { color: var(--ink-2); font-size: 12px; }
+
+/* ---- bodies drawer ----------------------------------------------------- */
+
+.bodies {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  bottom: 64px;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  background: var(--bar);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.bodies[hidden] { display: none; }
+.bodies header { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line); }
+.bodies header h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.bodies ul { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; flex: 1; }
+.bodies li { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; padding: 3px 8px 3px 12px; cursor: default; }
+.bodies li:hover { background: var(--panel-2); }
+.bodies li.sel { box-shadow: inset 2px 0 0 var(--gold-line); background: var(--panel-2); }
+.bodies li .sw { width: 10px; height: 10px; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); }
+.bodies li .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bodies li.off .nm { color: var(--ink-3); }
+.bodies li.group { display: block; padding: 8px 12px 2px; color: var(--ink-2); font-size: 12px; }
+.bodies li.group:hover { background: none; }
+.eye { border: 0; background: transparent; width: 24px; height: 22px; border-radius: 4px; cursor: pointer; color: var(--ink-2); display: grid; place-items: center; }
+.eye:hover { background: var(--line); color: var(--ink); }
+.eye svg { width: 16px; height: 16px; }
+
+body.viewer-only { overflow: hidden; }
+body.viewer-only .viewport { position: fixed; inset: 0; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

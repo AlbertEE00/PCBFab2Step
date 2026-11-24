@@ -35,6 +35,8 @@ COUNTERHOLE_FLAGS = ("--counterhole", "--counterhole-top", "--counterhole-bottom
 USAGE = """
   pcbfab2step [INPUT ...] [options]                         the board as a STEP model
   pcbfab2step [INPUT ...] --export TARGET:FORMAT [options]  one layer as DXF, SVG or STEP
+  pcbfab2step [INPUT ...] [options] --view [exact]          show it instead (nothing written)
+  pcbfab2step gui [INPUT ...] [options]                     the same in a window
   pcbfab2step info [INPUT ...]                              what was found, stackup, holes, targets
   pcbfab2step init [FOLDER]                                 config.toml with every setting
   pcbfab2step settings                                      every setting and its default"""
@@ -54,6 +56,13 @@ EPILOG = """examples:
   pcbfab2step FAB --export outline:step                 the plain PCB body
   pcbfab2step board.cvg parts.step                      IPC-2581 board with the parts of a STEP
   pcbfab2step FAB --sources ipc+drill+step              IPC-2581 as the board, the ODB++ not read
+  pcbfab2step FAB --sanitize --view                     look at the model first, write nothing
+  pcbfab2step FAB --export copper-top:svg --view        the layer as it would be written
+  pcbfab2step gui FAB                                   the options in a window, with a 3D view
+
+viewer (--view, and the GUI): a preview is meshed straight from the 2D regions in a second or
+  two; --view exact (the GUI's Exact button) builds the STEP's own solids and shows those.
+  The window needs pywebview (pip install pcbfab2step[gui]); without it the browser shows it.
 
 inputs:
   A folder is searched with its subfolders; a file also brings the other outputs in its folder,
@@ -179,6 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="any config.toml setting, e.g. --set finish.type=ENIG ('pcbfab2step settings' "
                         "lists them)")
 
+    v = p.add_argument_group("viewer")
+    v.add_argument("--view", nargs="?", const="fast", choices=["fast", "exact"], metavar="exact",
+                   help="show the model (or the --export layer) as it would be written, and write nothing; "
+                        "exact: the STEP's own solids (slower)")
+
     g = p.add_argument_group("messages")
     g.add_argument("-v", "--verbose", action="count", default=1, help="more detail")
     g.add_argument("-q", "--quiet", action="store_true", help="errors and warnings only")
@@ -197,6 +211,10 @@ def join_counterhole_args(argv: List[str]) -> List[str]:
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == "--view" and i + 1 < len(argv) and argv[i + 1] not in ("fast", "exact"):
+            out.append("--view=fast")                      # --view INPUT: the input is not its value
+            i += 1
+            continue
         if a in SIGNED and i + 1 < len(argv) and re.match(r"-[\d.]", argv[i + 1]):
             out.append(f"{a}={argv[i + 1]}")
             i += 2
@@ -397,6 +415,9 @@ def init(argv: List[str]) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "gui":
+        from .gui import main as gui_main
+        return gui_main(argv[1:])
     if argv and argv[0] == "init":
         return init(argv[1:])
     if argv and argv[0] == "settings":
@@ -409,6 +430,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.export and mode == "model":
         mode = "export"
     try:
+        if args.view and mode != "info":
+            from .view import run_view
+            Log.reset(0 if args.quiet else args.verbose)
+            _check_scope(args)
+            return run_view(args, mode)
         return run(args, mode)
     except ConfigError as exc:
         raise SystemExit(str(exc))

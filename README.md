@@ -34,6 +34,16 @@ uv run pcbfab2step --help
 or `pip install .` (optionally `pip install .[plot]` for the TrueType text
 fallback and `tools/section_plot.py`).
 
+The viewer and the GUI open in a window of their own with pywebview (Edge
+WebView2 on Windows, part of Windows 10 and 11):
+
+```
+uv sync --extra gui          # or: pip install .[gui]
+uv run pcbfab2step gui
+```
+
+Without it, `--view` and `gui --browser` show the same pages in the browser.
+
 ## Usage
 
 One call writes one output. Without `--export` it is the board as a STEP
@@ -43,6 +53,8 @@ that output, and options that belong to the other one are refused.
 ```
 pcbfab2step [INPUT ...] [options]                         the board as a STEP model
 pcbfab2step [INPUT ...] --export TARGET:FORMAT [options]  one layer as DXF, SVG or STEP
+pcbfab2step [INPUT ...] [options] --view [exact]          show it instead (nothing written)
+pcbfab2step gui [INPUT ...] [options]                     the same in a window
 pcbfab2step info [INPUT ...]                              what was found, stackup, holes, targets
 pcbfab2step init [FOLDER]                                 config.toml with every setting
 pcbfab2step settings                                      every setting and its default
@@ -58,6 +70,8 @@ pcbfab2step FAB --export solder-bot:svg --invert      the mask openings (as in G
 pcbfab2step FAB --export outline:step                 the plain PCB body
 pcbfab2step board.cvg parts.step                      IPC-2581 board with the parts of a STEP
 pcbfab2step FAB --sources ipc+drill+step              IPC-2581 as the board, the ODB++ not read
+pcbfab2step FAB --sanitize --view                     look at the model first, write nothing
+pcbfab2step gui FAB --show paste                      the window, starting with these options
 ```
 
 `uv run pcbfab2step` in a clone, or `python -m pcbfab2step`, works the same.
@@ -348,6 +362,43 @@ DXF is R12 with closed polylines in mm (layer `OUTLINE` and a layer named
 after the target); arcs are polylines at the tessellation tolerance. SVG is
 in mm, the layer filled and the outline as a line.
 
+## Viewer and GUI
+
+`--view` shows what the command would write and writes nothing: the board
+model, or with `--export` the layer as it would be written (flat from the top
+for DXF and SVG, in 3D for STEP).
+
+```
+pcbfab2step FAB --sanitize --view                 a preview, in a second or two
+pcbfab2step FAB --sanitize --view exact           the STEP's own solids (as long as writing it)
+pcbfab2step FAB --export solder-bot:svg --invert --view
+```
+
+The preview is meshed straight from the 2D region every solid of the STEP is
+made of (countersinks as stepped discs); `exact` builds the B-rep solids and
+shows those. The viewer rotates (left drag), pans (right drag), zooms to the
+cursor (wheel) and orbits around a double-clicked point; it has preset
+views, a section plane with the cut faces filled, the edges, a see-through
+solder mask and a list of the bodies with their visibility. These change the
+view only.
+
+`pcbfab2step gui [INPUT ...] [options]` puts the command line in a window.
+On the left the inputs (drop a fab folder or file on the window, or choose
+one; missing NC drill output or the ECAD's STEP can be dropped on their own
+slot), the STEP file to write and the options in groups (solder mask,
+silkscreen, finish, paste, components, vias, counterholes, ...), each a flag
+of the command line. In the middle the 3D view, on the right the board's
+layers from top to bottom: pick one to view it or export it as DXF, SVG or
+STEP, with the export settings (invert, outline, aperture offset, stencil
+thickness) above them. Along the bottom is the command line of all of this,
+updated as the options change: the Export button runs it, Copy copies it.
+
+The GUI has no settings of its own: anything it does is that command line,
+and `pcbfab2step gui FAB --show paste` opens with paste on. The fab data is
+read once; a change of the options rebuilds the preview from it (under a
+second for most changes), and colours and the bodies the settings leave out
+(paste, components) change in the view at once.
+
 ## Checking
 
 `--set output.svg_dir=DIR` also writes the 2D region of every layer as SVG.
@@ -378,7 +429,8 @@ Layout:
 
 ```
 src/pcbfab2step/
-  cli.py           command line: model, export, info, init, settings
+  cli.py           command line: model, export, info, init, settings, --view, gui
+  pipeline.py      the stages of a run (shared by the command line, the viewer and the GUI)
   sources.py       input discovery and source choice
   config.py        settings, config.toml format and merge, init
   board.py         the shared board description (layers, holes, counterholes, ...)
@@ -390,6 +442,12 @@ src/pcbfab2step/
   components.py    components from the ECAD's STEP export
   geometry.py      2D geometry and tessellation
   brep.py          OpenCascade B-rep, exact arc recovery, STEP writer
+  scene.py         meshes for the viewer (preview from the 2D regions, exact from the B-rep)
+  view.py          --view, and the small web server of the viewer and the GUI
+  gui.py           the GUI's back end
+  options.py       the GUI's options as command line flags
+  web/             viewer.js (three.js), the viewer's tool bar, the GUI page;
+                   vendor/three.bundle.min.js is three.js (MIT, see tools/build_web.md)
 tests/
 tools/
 ```
@@ -397,6 +455,11 @@ tools/
 ## Version history
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
+
+- 2.2.0: `--view [exact]` shows the model or the exported layer and writes
+  nothing; `pcbfab2step gui` is the command line in a window with a 3D view
+  (pywebview, `pip install .[gui]`). The runs are split into stages
+  (`pipeline.py`) that keep the fab data once read.
 
 - 2.1.1: exports leave out slivers under 20 um wide along the outline (an
   inverted solder mask showed a hairline along the board edge).
@@ -472,3 +535,6 @@ This project is dual-licensed under the **GNU Affero General Public License v3.0
 
 Every source file carries the notice
 `SPDX-License-Identifier: AGPL-3.0-only`, Copyright (C) 2026 Albert van Zyl.
+
+`src/pcbfab2step/web/vendor/three.bundle.min.js` is three.js (Copyright
+2010-2026 three.js authors, MIT licence, `LICENSE-three.txt` beside it).

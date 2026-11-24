@@ -396,6 +396,7 @@ class Scene:
     flat: bool = False              # a 2D layer view
     info: List[str] = field(default_factory=list)
     hidden: List[str] = field(default_factory=list)     # kinds the settings hide (shown on request)
+    model: object = None                                  # the Model it was made from (not packed)
 
     def bounds(self):
         ps = [p.mesh.pos for p in self.parts if len(p.mesh.pos)]
@@ -471,6 +472,7 @@ def model_scene(job, exact: bool = False) -> Scene:
     parts = _parts_from_components(comps)
     sc = Scene(job.read().name + (" (exact)" if exact else ""), "exact" if exact else "fast", parts)
     sc.hidden = hidden
+    sc.model = m
     return sc
 
 
@@ -520,16 +522,38 @@ def layer_scene(job, spec: str) -> Scene:
     return sc
 
 
-def to_html(manifest: dict, blob: bytes, viewer_js: str, three_js: str, controls_js: str, css: str) -> str:
-    """A self-contained viewer page (the CLI's --view without pywebview)."""
-    import base64
-    payload = base64.b64encode(blob).decode("ascii")
+WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
-    def mod(src):
-        return "data:text/javascript;base64," + base64.b64encode(src.encode()).decode("ascii")
-    imports = {"three": mod(three_js), "three/addons/controls/OrbitControls.js": mod(controls_js)}
-    return ("<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + manifest.get("title", "PCBFab2Step") +
-            "</title><style>" + css + "</style><script type='importmap'>" + json.dumps({"imports": imports}) +
-            "</script></head><body class='viewer-only'><div id='viewer'></div>"
-            "<script>window.PCB_SCENE={manifest:" + json.dumps(manifest) + ",data:'" + payload + "'};</script>"
-            "<script type='module'>" + viewer_js + "</script></body></html>")
+
+def web_text(name: str) -> str:
+    with open(os.path.join(WEB, *name.split("/")), encoding="utf-8") as f:
+        return f.read()
+
+
+# the ES modules of the viewer, by the names they import each other with
+MODULES = {"three": "vendor/three.bundle.min.js", "pcbfab2step/viewer": "viewer.js",
+           "pcbfab2step/viewer-ui": "viewer-ui.js"}
+
+
+def _script_json(obj) -> str:
+    return json.dumps(obj, separators=(",", ":")).replace("<", "\\u003c")
+
+
+def to_html(manifest: dict, blob: bytes) -> str:
+    """A self-contained viewer page (the CLI's --view without pywebview):
+    the modules as data: URLs in an import map, the scene in base64."""
+    import base64
+    import html
+
+    def mod(name):
+        return "data:text/javascript;base64," + base64.b64encode(web_text(name).encode("utf-8")).decode("ascii")
+    imports = {k: mod(v) for k, v in MODULES.items()}
+    return ("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+            "<title>" + html.escape(manifest.get("title", "PCBFab2Step")) + "</title>"
+            "<style>" + web_text("viewer.css") + "</style>"
+            "<script type='importmap'>" + _script_json({"imports": imports}) + "</script></head>"
+            "<body class='viewer-only'><main id='viewer' class='viewport'></main>"
+            "<script>window.PCB_SCENE={manifest:" + _script_json(manifest) + ",data:'" +
+            base64.b64encode(blob).decode("ascii") + "'};</script>"
+            "<script type='module'>" + web_text("view.js") + "</script></body></html>")

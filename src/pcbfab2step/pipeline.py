@@ -7,8 +7,11 @@
     job.read()               the fab data read (kept in the Session per inputs
                              and reader settings: a GUI change does not re-read)
     job.prepare()            the model: stackup, holes, via protection
-    job.scene(exact)         meshes for the viewer (scene.py)
-    job.write()              the STEP model, or the --export files
+    job.build()              the B-rep solids, with the ECAD STEP's components
+    job.write_model()        the STEP model; job.write_export(): the --export files
+
+scene.model_scene(job) and scene.layer_scene(job, spec) make the viewer's
+meshes from the same job.
 
 The command line runs one Job. The GUI keeps a Session and makes a Job for
 every change of its command line; what a change does not touch is reused.
