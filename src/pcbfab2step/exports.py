@@ -7,20 +7,25 @@ the top, as in Gerber).
 
     --export TARGET:FORMAT[,FORMAT]
 
-TARGET is a generic name or the layer's name in the fab data:
+TARGET is a generic name or the layer's name in the fab data. A layer is
+exported as it is on the board (as the model builds it), not as the artwork:
 
     outline                    DXF/SVG: the board outline; STEP: the plain PCB body
-    paste-top    paste-bot     solder paste openings
+    paste-top    paste-bot     solder paste deposits
     stencil-top  stencil-bot   the outline minus the paste openings; in STEP a plate of
                                the stencil thickness lying on the board surface
-    solder-top   solder-bot    solder mask openings
-    silk-top     silk-bot      silkscreen
-    copper-top   copper-bot    outer copper; copper-N: the Nth copper layer from the top
+    solder-top   solder-bot    the solder mask: the outline minus its openings, tented
+                               vias closed, holes through the mask cut
+    silk-top     silk-bot      silkscreen (clipped to the solder mask)
+    copper-top   copper-bot    outer copper, holes cut; copper-N: the Nth copper layer from the top
 
-Without -top/-bot the side that has data is taken. DXF and SVG include the
-outline unless --no-outline; a STEP layer is the layer alone unless
---outline, which adds the PCB body. --aperture-offset grows (+) or shrinks
-(-) the features (stencil apertures before the stencil is cut).
+Without -top/-bot the side that has data is taken. --invert exports the
+rest of the outline instead (the solder mask openings, the stencil's paste,
+the clearances in the copper). DXF and SVG include the outline unless
+--no-outline; a STEP layer is the layer alone unless --outline, which adds
+the PCB body. --aperture-offset grows (+) or shrinks (-) the artwork before
+the layer is made: paste and stencil apertures, solder mask openings,
+copper and silkscreen features.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Set
 
 import numpy as np
+import shapely
 
 from .common import info
 from .geometry import clean, gdiff, ginter, iter_polys
@@ -45,20 +51,25 @@ class Target:
     fab: str                     # name in the fab data
     kind: str                    # outline, paste, stencil, mask, silk, copper
     side: str                    # top, bottom, "" (outline, inner copper)
-    image_fn: object             # () -> 2D region (board coordinates, mm)
+    art_fn: object               # () -> the artwork in the fab data (2D, board coordinates, mm)
     z0: float                    # where the layer sits in the model
     z1: float
     color: tuple = (0.6, 0.6, 0.6)
     aliases: Set[str] = field(default_factory=set)
-    _img: object = None
+    material_fn: object = None   # (artwork, offset) -> the layer as it is on the board
+    _art: object = None
 
-    def image(self):
-        if self._img is None:
-            self._img = clean(self.image_fn())
-        return self._img
+    def art(self):
+        if self._art is None:
+            self._art = clean(self.art_fn())
+        return self._art
+
+    def material(self, art=None, grow: float = 0.0):
+        art = self.art() if art is None else art
+        return clean(self.material_fn(art, grow)) if self.material_fn is not None else art
 
     def has_data(self) -> bool:
-        return not self.image().is_empty
+        return not self.art().is_empty
 
 
 def canon(name: str) -> str:
@@ -82,7 +93,8 @@ def targets(model) -> List[Target]:
         side = "top" if L is st.top_cu else "bottom" if L is st.bot_cu else ""
         g = {"top": "copper-top", "bottom": "copper-bot"}.get(side, f"copper-{n}")
         out.append(Target(g, L.name, "copper", side, (lambda L=L: model.copper_image(L)), L.z0, L.z1,
-                          o.copper_color, {f"copper-{n}"}))
+                          o.copper_color, {f"copper-{n}"},
+                          material_fn=lambda art, grow, L=L: model.copper_sheet(L, art)))
     for side in ("top", "bottom"):
         sg = 1.0 if side == "top" else -1.0
         surf = model._surface(side)
@@ -100,11 +112,13 @@ def targets(model) -> List[Target]:
                 if kind == "mask":
                     al |= {f"mask-{short}", f"mask-{side}"}
                 out.append(Target(g, L.name, kind, side, (lambda L=L: model.image(L)), min(za, zb2), max(za, zb2),
-                                  color, al))
+                                  color, al,
+                                  material_fn=lambda art, grow, k=kind, sd=side: model.coat_sheet(k, sd, art, grow)))
                 if kind == "paste":
                     sg_ = "stencil" + g[len("paste"):]
                     out.append(Target(sg_, f"{L.name} stencil", "stencil", side, (lambda L=L: model.image(L)),
-                                      0.0, 0.0, STENCIL_GREY, {"stencil" + a[len("paste"):] for a in al}))
+                                      0.0, 0.0, STENCIL_GREY, {"stencil" + a[len("paste"):] for a in al},
+                                      material_fn=lambda art, grow: gdiff(model.B, art)))
     return out
 
 
@@ -148,10 +162,16 @@ def parse_export(spec: str, output: Optional[str]):
     return name.strip(), formats
 
 
+# Shorter edges than this are rounding steps in the data (Altium writes 1e-7 inch,
+# 2.54 nm, where an arc meets a line): a mitre offset would turn one into a spike.
+MICRO_EDGE = 1e-4   # mm
+
+
 def offset(geom, d: float):
     """Grow (+) or shrink (-) every feature by d mm; square corners stay square."""
     if not d or geom.is_empty:
         return geom
+    geom = shapely.remove_repeated_points(geom, MICRO_EDGE)
     return clean(geom.buffer(d, join_style="mitre", mitre_limit=2.0))
 
 
@@ -160,19 +180,26 @@ def export(model, spec: str, opts, out_dir: str, base: str, output: Optional[str
     t = find_target(model, name)
     B = model.B
     d = float(getattr(opts, "aperture_offset", 0.0) or 0.0)
-    img = t.image()
+    inv = bool(getattr(opts, "export_invert", False))
     if t.kind == "outline":
+        if inv:
+            raise SystemExit("--invert: the outline has nothing around it to export")
         geom = B
     else:
-        n0 = len(list(iter_polys(img)))
-        img = offset(img, d)
+        art = t.art()
         if d:
-            n1 = len(list(iter_polys(img)))
-            info(f"  features offset by {d:+.4f} mm" + (f"; {n0 - n1} vanished" if n1 < n0 else ""))
-        geom = clean(gdiff(B, img)) if t.kind == "stencil" else clean(ginter(img, B))
+            n0 = len(list(iter_polys(art)))
+            art = offset(art, d)
+            n1 = len(list(iter_polys(art)))
+            what = "mask openings" if t.kind == "mask" else "apertures" if t.kind in ("paste", "stencil") \
+                else "features"
+            info(f"  {what} offset by {d:+.4f} mm" + (f"; {n0 - n1} vanished" if n1 < n0 else ""))
+        geom = clean(ginter(t.material(art, d), B))
+        if inv:
+            geom = clean(gdiff(B, geom))
     if t.kind != "outline" and geom.is_empty:
-        raise SystemExit(f"--export {name}: the layer is empty")
-    label = t.fab if canon(name) == canon(t.fab) else t.generic
+        raise SystemExit(f"--export {name}{' --invert' if inv else ''}: the layer is empty")
+    label = (t.fab if canon(name) == canon(t.fab) else t.generic) + ("_inverted" if inv else "")
     with_outline = getattr(opts, "export_outline", None)
     written = []
     for fmt in formats:
@@ -184,7 +211,7 @@ def export(model, spec: str, opts, out_dir: str, base: str, output: Optional[str
             path = os.path.join(out_dir, f"{base}_{label}.{fmt}")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         if fmt in ("dxf", "svg"):
-            outl = None if (t.kind in ("outline", "stencil") or with_outline is False) else B
+            outl = None if (t.kind == "outline" or with_outline is False) else B
             if fmt == "dxf":
                 write_dxf(path, geom, outl, label)
             else:

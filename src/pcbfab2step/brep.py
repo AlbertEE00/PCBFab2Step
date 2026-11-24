@@ -163,6 +163,20 @@ def drop_collinear(P: np.ndarray, eps: float = 1e-4) -> np.ndarray:
     return P
 
 
+def _uneven(pts: np.ndarray, fit, tol: float) -> bool:
+    """A tessellated arc bows alike over all its chords (a chord over a
+    dropped vertex bows 4 times as much): a chord bowing over ten times the
+    median, and beyond the tolerance, is a straight edge between short
+    chords that are co-circular with it by chance (a slot side between its
+    end arcs), not part of an arc."""
+    if fit is None:
+        return True
+    r = fit[2]
+    c = np.hypot(*(pts[1:] - pts[:-1]).T)
+    sag = r - np.sqrt(np.maximum(r * r - 0.25 * c * c, 0.0))
+    return float(sag.max()) > max(tol, 10.0 * float(np.median(sag)))
+
+
 def find_arcs(P: np.ndarray):
     """Find runs of consecutive vertices that lie on common circles (within
     the tessellation tolerance) by greedy growth with an incremental circle
@@ -262,7 +276,7 @@ def find_arcs(P: np.ndarray):
                     break
                 ids.pop()
             sweep = abs(sum(turnl[k] for k in ids[1:-1])) if len(ids) >= 4 else 0.0
-            if len(ids) >= 4 and sweep >= math.radians(1.0):
+            if len(ids) >= 4 and sweep >= math.radians(1.0) and not _uneven(P[ids], fit, tol):
                 if len(ids) >= n:          # whole ring on one circle
                     fit = _lsq_circle(P)
                     if fit is not None:

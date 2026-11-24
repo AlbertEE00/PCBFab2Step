@@ -54,6 +54,7 @@ pcbfab2step FAB --sanitize                            no inner layers, only expo
 pcbfab2step FAB --show paste --color mask=black
 pcbfab2step FAB --export stencil-bot:step --thickness stencil=4mil --aperture-offset -1mil
 pcbfab2step FAB --export paste-bot:dxf --no-outline
+pcbfab2step FAB --export solder-bot:svg --invert      the mask openings (as in Gerber)
 pcbfab2step FAB --export outline:step                 the plain PCB body
 pcbfab2step board.cvg parts.step                      IPC-2581 board with the parts of a STEP
 pcbfab2step FAB --sources ipc+drill+step              IPC-2581 as the board, the ODB++ not read
@@ -130,7 +131,8 @@ any of them (`--set finish.type=ENIG`, `--set backdrill.stub=0.05`,
 | `--sanitize [LEVEL]` | `outer`, `exposed` (default), `pads` | `[model] sanitize` |
 | `--vias RULE` | IPC-4761 rule, `none`, `undrilled`, `drilled` | `[vias]` |
 | `--counterhole[-top\|-bottom] SPEC` | counterhole type, angle, depth | `[counterholes]` |
-| `--aperture-offset SIZE` | grow or shrink exported features | `[export] aperture_offset` |
+| `--invert` | export the rest of the outline instead of the layer | |
+| `--aperture-offset SIZE` | grow or shrink the artwork of an exported layer | `[export] aperture_offset` |
 | `--sources LIST` | sources to use | `[sources] use` |
 
 The report prints the source of every thickness and of every counterhole
@@ -178,7 +180,12 @@ given as an input is used whatever its name.
 
 - `outer`: only the outer copper layers; the inner copper and all
   dielectrics become one core body, like Altium's STEP. Vias are not drilled
-  (`--vias drilled` drills them); their pads stay.
+  (`--vias drilled` drills them); their pads stay, and so does what shows on
+  the surface: a capped via keeps its cap where the solder mask leaves it in
+  view (with the plating and fill under it, within the outer copper, as in
+  the full model), so a filled and capped back drill bore is closed as on the
+  board. A cap under the mask cannot be seen and is left out. Tenting closes
+  the vias' own mask openings as in the full model.
 - `exposed` (the default for a bare `--sanitize`): also the outer copper is
   cut to the pads plus the copper the solder mask leaves open; a side without
   solder mask keeps all its copper.
@@ -186,7 +193,12 @@ given as an input is used whatever its name.
 
 Pads come from the data: ODB++ pad features (P records, vias by
 `.pad_usage=via`), IPC-2581 padstack pads. `--vias undrilled` leaves the
-vias out of any model.
+vias undrilled in any model. With `exposed` and `pads` the pads of undrilled
+vias go too (a tented via's opening is not exposed copper), and their caps
+with them.
+
+The via settings work as in the full model, e.g. fill, cap and tent every
+via: `--set vias.fill=epoxy --set vias.cap=true --set vias.tent=both`.
 
 ## Counterholes
 
@@ -259,8 +271,8 @@ Applied in this order: fab data (ODB++ `.ipc_via_type_*`, `.via_in_pad`,
 in ODB++ and IPC-2581), then the `[vias]` settings (fill, cap, tent, plug
 every via, optionally up to `max_diameter`), then the rules of `[vias] rules`
 and `--vias`, such as `7:max=0.3` (fill and cap vias up to 0.3 mm) or `1b`
-(tent all vias on both sides). `--vias undrilled` leaves the vias out (their
-pads stay).
+(tent all vias on both sides). `--vias undrilled` leaves the vias undrilled
+(their pads and visible caps stay, see Hiding design detail).
 
 On the document layers, Altium's via features (IPC-4761 fill, cap, ...) are
 pads at the via positions: pads in ODB++, pads of padstacks of their own in
@@ -288,37 +300,47 @@ drill radius, and has no paste.
 ## Layer export
 
 ```
-pcbfab2step FAB --export TARGET:FORMAT [--outline | --no-outline] [--aperture-offset SIZE]
+pcbfab2step FAB --export TARGET:FORMAT [--invert] [--outline | --no-outline] [--aperture-offset SIZE]
 ```
 
 One layer of the board in the board's own coordinates: the same origin as
 the STEP model, bottom layers seen from the top (as in Gerber). FORMAT is
 `dxf`, `svg` or `step` (or a comma list, `dxf,svg`), or comes from `-o`.
 
+A layer is exported as it is on the board, the same region as its body in
+the model, not as its artwork. The solder mask layer of Gerber and ODB++ is
+drawn as its openings; the export is the mask itself.
+
 | target | |
 |---|---|
 | `outline` | DXF/SVG: the board outline; STEP: the plain PCB body (solder mask included, like the ECAD's simplified board) |
-| `paste-top`, `paste-bot` | solder paste openings |
+| `paste-top`, `paste-bot` | the solder paste deposits |
 | `stencil-top`, `stencil-bot` | the stencil: the outline minus the paste openings; STEP: a plate of `--thickness stencil=SIZE` (0.1 mm) lying on the board surface |
-| `solder-top`, `solder-bot` | solder mask openings |
-| `silk-top`, `silk-bot` | silkscreen |
-| `copper-top`, `copper-bot`, `copper-N` | a copper layer, N counted from the top |
+| `solder-top`, `solder-bot` | the solder mask: the outline minus its openings, the tented via openings closed, the holes through the mask cut |
+| `silk-top`, `silk-bot` | the silkscreen, clipped to the solder mask |
+| `copper-top`, `copper-bot`, `copper-N` | a copper layer with its holes cut, N counted from the top |
 | the layer's name in the fab data | that layer (`info` lists them) |
 
 Without `-top`/`-bot` (`stencil`, `paste`, `solder`, `silk`) the side that
-has data is taken. DXF and SVG include the outline unless `--no-outline`; a
-STEP layer is the layer alone at its place in the model, and `--outline` adds
-the PCB body (clear of the layer, so the two never overlap).
+has data is taken. `--invert` exports the rest of the outline instead: the
+solder mask openings (as in Gerber), the paste of a stencil, the clearances
+in a copper layer; the file name gets `_inverted`. DXF and SVG include the
+outline unless `--no-outline`; a STEP layer is the layer alone at its place
+in the model, and `--outline` adds the PCB body (clear of the layer, so the
+two never overlap). `--vias`, `--counterhole` and `--sanitize` shape an
+exported layer as they shape the model (tenting, holes, copper).
 
-`--aperture-offset SIZE` grows (`+`) or shrinks (`-`) every feature of the
-exported layer before anything else: a stencil aperture pull-back is
+`--aperture-offset SIZE` grows (`+`) or shrinks (`-`) the artwork before the
+layer is made: paste and stencil apertures, solder mask openings (the mask
+shrinks), copper and silkscreen features. A stencil aperture pull-back is
 `--aperture-offset -1mil`. Square corners stay square; apertures that vanish
-are counted in the report.
+are counted in the report. Steps shorter than 0.1 um in the data (Altium
+rounds coordinates to 1e-7 inch where an arc meets a line) are removed
+first, so they cannot turn into spikes at a corner.
 
 DXF is R12 with closed polylines in mm (layer `OUTLINE` and a layer named
 after the target); arcs are polylines at the tessellation tolerance. SVG is
-in mm, the layer filled and the outline as a line. Drills are not cut from 2D
-exports: they show the layer as in the fab data.
+in mm, the layer filled and the outline as a line.
 
 ## Checking
 
@@ -370,6 +392,18 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 2.1.0: layers are exported as they are on the board: `solder-*` is the
+  solder mask (it was its openings), copper has its holes cut, silkscreen is
+  clipped to the mask. `--invert` is back, for every layer (the mask
+  openings, the stencil's paste). `--aperture-offset` no longer turns
+  rounding steps in the data into spikes at corners. With `--sanitize` (vias
+  undrilled) the vias keep what shows on the surface: visible caps, filled
+  and capped back drill bores closed, tenting. `--vias` and `--counterhole`
+  also act on exports; stencil DXF and SVG get the outline like the other
+  layers (`--no-outline` leaves it out). An ODB++ job folder named `odb` takes
+  the board's name from the files beside it. Arc fitting no longer bows a
+  straight edge that sits between short chords (a slot side between its end
+  arcs): such runs keep their polygon.
 - 2.0.0: a new command line. One call writes one output: the board model, or
   with `--export TARGET:FORMAT` one layer (`stencil-bot` replaces the
   inverted paste, `--aperture-offset` for aperture pull-back, `--outline`

@@ -51,6 +51,7 @@ EPILOG = """examples:
   pcbfab2step FAB --show paste --color mask=black
   pcbfab2step FAB --export stencil-bot:step --thickness stencil=4mil --aperture-offset -1mil
   pcbfab2step FAB --export paste-bot:dxf --no-outline
+  pcbfab2step FAB --export solder-bot:svg --invert      the mask openings (as in Gerber)
   pcbfab2step FAB --export outline:step                 the plain PCB body
   pcbfab2step board.cvg parts.step                      IPC-2581 board with the parts of a STEP
   pcbfab2step FAB --sources ipc+drill+step              IPC-2581 as the board, the ODB++ not read
@@ -65,16 +66,19 @@ inputs:
   ODB++ next to IPC-2581: via types). Gerber is found but not read yet.
 
 export targets (--export TARGET:FORMAT, FORMAT dxf, svg or step; several: dxf,svg):
+  A layer is exported as it is on the board (as in the model), not as the artwork.
   outline                      DXF/SVG: the board outline; STEP: the plain PCB body
-  paste-top   paste-bot        solder paste openings
+  paste-top   paste-bot        solder paste deposits
   stencil-top stencil-bot      the stencil: outline minus the paste openings; STEP: a plate,
                                --thickness stencil=SIZE (0.1 mm), on the board surface
-  solder-top  solder-bot       solder mask openings
-  silk-top    silk-bot         silkscreen
-  copper-top  copper-bot  copper-N   copper layer, N counted from the top
+  solder-top  solder-bot       the solder mask: outline minus its openings, tented vias closed
+  silk-top    silk-bot         silkscreen, clipped to the solder mask
+  copper-top  copper-bot  copper-N   copper layer (holes cut), N counted from the top
   or a layer's name in the fab data ('pcbfab2step info' lists them). Without -top/-bot the
-  side with data is taken. DXF and SVG include the outline (--no-outline to leave it out); a
-  STEP layer is the layer alone (--outline adds the PCB body).
+  side with data is taken. --invert: the rest of the outline instead (mask openings, the paste
+  of a stencil, the clearances in the copper). DXF and SVG include the outline (--no-outline
+  to leave it out); a STEP layer is the layer alone (--outline adds the PCB body). --vias,
+  --counterhole and --sanitize shape the exported layer as they shape the model.
 
 sizes: mm unless a unit is given: 0.1, 0.1mm, 100um, 4mil, 0.004in
 
@@ -158,8 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--outline", action=argparse.BooleanOptionalAction, default=None,
                    help="with the board outline: DXF and SVG have it unless --no-outline; STEP only with "
                         "--outline (the PCB body)")
+    x.add_argument("--invert", action="store_true",
+                   help="the rest of the outline instead of the layer: the solder mask openings, the paste of "
+                        "a stencil, the clearances in the copper")
     x.add_argument("--aperture-offset", metavar="SIZE",
-                   help="grow (+) or shrink (-) the exported features, e.g. stencil apertures: -0.05mm, -2mil")
+                   help="grow (+) or shrink (-) the artwork before the layer is made: stencil and paste "
+                        "apertures, mask openings, features; e.g. -0.05mm, -2mil")
 
     a = p.add_argument_group("sizes and colours (board model and exports)")
     a.add_argument("--thickness", action="append", default=[], metavar="ITEM=SIZE",
@@ -320,12 +328,11 @@ def settings_from_args(args) -> SimpleNamespace:
 
 def _check_scope(args):
     """One call, one output: flags of the other output are mistakes."""
-    model_only = [f for f, v in (("--show", args.show), ("--hide", args.hide), ("--vias", args.vias),
-                                 ("--counterhole", args.counterhole + args.counterhole_top
-                                  + args.counterhole_bottom)) if v]
+    model_only = [f for f, v in (("--show", args.show), ("--hide", args.hide)) if v]
     if args.export and model_only:
         raise SystemExit(f"{', '.join(model_only)}: acts on the board model, not on --export")
     export_only = [f for f, v in (("--outline/--no-outline", args.outline is not None),
+                                  ("--invert", args.invert),
                                   ("--aperture-offset", args.aperture_offset is not None)) if v]
     if not args.export and export_only:
         raise SystemExit(f"{', '.join(export_only)}: only with --export")
@@ -374,6 +381,7 @@ def run(args, mode: str) -> int:
     opts.outer_copper = {"exposed": "exposed", "pads": "pads"}.get(opts.sanitize, "all")
     opts.vias = cli.vias_drilled
     opts.export_outline = args.outline
+    opts.export_invert = args.invert
     Tess.tol = max(1e-5, opts.arc_tolerance)
     ArcFit.enabled = opts.arc_fit != "off"
     ArcFit.strict = opts.arc_fit == "strict"

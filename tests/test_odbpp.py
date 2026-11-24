@@ -3,6 +3,7 @@
 
 """ODB++ reader on a synthetic job and the counterhole precedence chain."""
 
+import os
 import pytest
 
 from pcbfab2step import odbpp
@@ -154,3 +155,15 @@ def test_backdrill_must_not_cut_from_layer_name(odb_job, opts):
     bd = [c for c in m.cuts if c.kind == "backdrill"]
     assert len(bd) == 1 and bd[0].z_lo == pytest.approx(m.stk.stack[-1].z1)   # up to BOT's upper face
     assert any("must-not-cut layer BOT (named by the layer; its span ends at TOP)" in n for n in m.hole_notes)
+
+
+def test_generic_job_folder_name(tmp_path):
+    """Altium writes the ODB++ job folder as 'odb' next to <board>.REP: the board takes that name."""
+    from conftest import write_odb
+    from pcbfab2step.odbpp import OdbJob
+    job = write_odb(str(tmp_path / "ODB++"))
+    odb = tmp_path / "ODB++" / "odb"
+    os.rename(job, odb)
+    assert OdbJob(str(odb)).name == "odb"
+    (tmp_path / "ODB++" / "Board 7.REP").write_text("report")
+    assert OdbJob(str(odb)).name == "Board 7"

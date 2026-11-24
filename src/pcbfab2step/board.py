@@ -112,6 +112,8 @@ class Hole:
     # side -> (radius, z_end) of a back drill bore that the via fill closes
     bores: Dict[str, tuple] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    undrilled: bool = False          # a via left undrilled (--sanitize): the core stays solid
+    stub: bool = False               # what such a via shows on one surface: its cap, within the outer copper
 
     def region_drill(self):
         return self.geom_drill if self.geom_drill is not None else circle(self.x, self.y, self.r_drill)

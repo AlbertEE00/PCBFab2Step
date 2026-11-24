@@ -55,6 +55,19 @@ def test_aperture_offset():
     assert ex.offset(g, -0.6).is_empty
 
 
+def test_aperture_offset_ignores_rounding_steps():
+    """Where an arc meets a line Altium's coordinates can be a rounding step
+    (1e-7 inch) apart: a 2.54 nm edge. A mitre offset must not turn it into a spike."""
+    import shapely
+    from shapely.geometry import Polygon
+    from pcbfab2step import exports as ex
+    pts = [(-1.0, -1.0), (0.0, 0.0), (0.3, 1.0), (-1.0, 1.0)]       # convex corner of 120 deg at (0, 0)
+    stepped = pts[:2] + [(2.54e-6, 0.0)] + pts[2:]                    # the same corner with a rounding step
+    a, b = ex.offset(Polygon(pts), 0.1), ex.offset(Polygon(stepped), 0.1)
+    assert shapely.hausdorff_distance(a, b) < 1e-4
+    assert abs(a.area - b.area) < 1e-5
+
+
 def test_export_step_with_outline(tmp_path, ipc_file):
     pytest.importorskip("OCP")
     src = _src(tmp_path, ipc_file)
@@ -63,12 +76,55 @@ def test_export_step_with_outline(tmp_path, ipc_file):
     assert "PCB (" in text and "'Bottom Solder'" in text
 
 
+def test_solder_export_is_the_mask(ipc_file, opts):
+    """The solder target is the mask as on the board (the outline minus the
+    openings, minus the holes through it), not the artwork; inverted: the openings."""
+    from pcbfab2step.geometry import gdiff
+    m = Model(ipc2581.read(ipc_file, opts), opts)
+    m.prepare()
+    t = exports.find_target(m, "solder-bot")
+    art, sheet = t.art(), t.material()
+    assert art.area > 0.5 and sheet.intersection(art).area < 1e-9
+    assert m.B.area - art.area - 15 < sheet.area < m.B.area - art.area    # less the holes through it
+    assert art.difference(gdiff(m.B, sheet)).area < 1e-9                  # --invert: the openings
+
+
+def test_invert(tmp_path, ipc_file):
+    src = _src(tmp_path, ipc_file)
+    assert main([str(src), "--export", "solder-bot:dxf", "--invert", "-q"]) == 0
+    assert list((tmp_path / "PCBFab2Step").glob("*solder-bot_inverted.dxf"))
+    with pytest.raises(SystemExit, match="only with --export"):
+        main([str(src), "--invert", "-q"])
+    with pytest.raises(SystemExit, match="nothing around it"):
+        main([str(src), "--export", "outline:dxf", "--invert", "-q"])
+
+
+def test_sanitize_keeps_visible_caps(ipc_file, opts):
+    """Undrilled vias (--sanitize): the core stays solid; a cap that shows keeps
+    its stub within the outer copper, a cap under the solder mask is left out.
+    Via_1 is capped both sides: covered by the top mask, in a bottom opening."""
+    opts.external_only, opts.vias, opts.outer_copper = True, None, "all"
+    m = Model(ipc2581.read(ipc_file, opts), opts)
+    m.prepare()
+    st = m.stk.stack
+    stubs = [h for h in m.holes if h.stub]
+    assert not any(h.kind == "via" and not h.stub for h in m.holes)      # no via drilled
+    assert len(stubs) == 1
+    s = stubs[0]
+    assert (round(s.x, 3), round(s.y, 3)) == (15.0, 10.0)
+    assert s.cap_bot > 0 and s.cap_top == 0 and s.top_idx == s.bot_idx == len(st) - 1
+    assert (s.z_lo, s.z_hi) == (st[-1].z0, st[-1].z1)                  # within the bottom copper
+    assert all(c.z_hi <= st[-1].z1 + 1e-9 for c in m.cuts if c.hole is s)
+    note = next(n for n in m.hole_notes if n.startswith("vias not drilled"))
+    assert "caps kept on the surface: 1 on bottom" in note and "1 cap(s) under the solder mask" in note
+
+
 def test_external_only(ipc_file, opts):
     pytest.importorskip("OCP")
     opts.external_only, opts.vias, opts.outer_copper = True, None, "pads"
     m = Model(ipc2581.read(ipc_file, opts), opts)
     m.prepare()
-    assert not any(h.kind == "via" for h in m.holes)               # vias not drilled by default
+    assert not any(h.kind == "via" and not h.stub for h in m.holes)  # vias not drilled by default
     assert any(n.startswith("vias not drilled") for n in m.hole_notes)
     m.build()
     names = [c["name"] for c in m.components]

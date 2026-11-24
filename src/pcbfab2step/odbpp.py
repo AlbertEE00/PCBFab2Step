@@ -118,6 +118,9 @@ def unlzw(data: bytes) -> bytes:
     return bytes(out)
 
 
+GENERIC_JOB_NAMES = {"odb", "odb++", "odbpp", "job"}
+
+
 class OdbJob:
     def __init__(self, path: str):
         self.path = path
@@ -193,6 +196,13 @@ class OdbJob:
                 base = base[: -len(ext)]
                 break
         base = re.sub(r"^[0-9a-f]{8}-", "", base)  # upload prefixes
+        if base.lower() in GENERIC_JOB_NAMES and os.path.isdir(self.path):
+            # Altium writes the job folder as 'odb' next to <board>.REP (and the archives)
+            parent = os.path.dirname(os.path.abspath(os.path.normpath(self.path)))
+            stems = Counter(os.path.splitext(f)[0] for f in os.listdir(parent)
+                            if f.lower().endswith((".rep", ".tgz", ".zip")) and os.path.isfile(os.path.join(parent, f)))
+            if stems:
+                return stems.most_common(1)[0][0]
         return base or "odb"
 
     # .. file access ..........................................................

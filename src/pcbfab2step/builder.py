@@ -11,6 +11,7 @@ and builds named, coloured bodies for the STEP writer."""
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import math
 import os
@@ -308,6 +309,7 @@ class Model:
         self.B = EMPTY
         self._unaligned = set()
         self._tent_region: Dict[str, object] = {}
+        self.vias_drilled = True
 
     # .. images ...............................................................
     def image(self, L: Layer):
@@ -318,21 +320,80 @@ class Model:
         return clean(ginter(g, self.B))
 
     def copper_image(self, L: Layer):
-        """Copper image; with --pads-only the pads alone on the outer layers."""
+        """Copper image; with --sanitize pads/exposed the pads alone (and the
+        exposed copper) on the outer layers, without the pads of undrilled vias."""
         st = self.stk.stack
         mode = getattr(self.opts, "outer_copper", "all")
         if mode == "all" or L not in (st[0], st[-1]) or L.pads_fn is None:
             return self.image(L)
-        vias = any(h.kind == "via" for h in self.holes)
-        g = L.pads_fn(vias)
+        g = L.pads_fn(self.vias_drilled)
         if mode == "exposed":
             # plus the copper the solder mask leaves open (pours, exposed traces)
             side = "top" if L is st[0] else "bottom"
             masks = [] if self.opts.no_mask else self.stk.coats[side].get("mask", [])
             if not masks:
                 return self.image(L)              # no solder mask: all of it is exposed
-            g = union_all([g, ginter(self.image(L), union_all(self.image(M) for M in masks))])
+            open_ = gdiff(union_all(self.image(M) for M in masks), self._tent_region.get(side, EMPTY))
+            g = union_all([g, ginter(self.image(L), open_)])
         return clean(ginter(g, self.B))
+
+    def mask_cover(self, side: str, openings=None, grow: float = 0.0):
+        """Where the solder mask covers one side: the outline minus the openings,
+        plus the tented via openings (grown with the openings when they are
+        offset). None without a solder mask on that side."""
+        masks = [] if self.opts.no_mask else self.stk.coats[side].get("mask", [])
+        if not masks:
+            return None
+        if openings is None:
+            openings = union_all(self.image(L) for L in masks)
+        M = gdiff(self.B, openings)
+        tents = self._tent_region.get(side, EMPTY)
+        if not tents.is_empty:
+            if grow > 0:
+                tents = tents.buffer(grow, join_style="mitre", mitre_limit=2.0)
+            M = union_all([M, ginter(tents, self.B)])
+        return M
+
+    def coat_sheet(self, kind: str, side: str, art, grow: float = 0.0):
+        """A coating as the model builds it on the surface, from its artwork
+        (layer export): solder mask = the cover minus the holes through it;
+        silkscreen clipped to the mask (or off the holes); paste off the open
+        holes (a capped via in a pad is printed over)."""
+        holes, pierce, holes_open = self._coat_cuts(side)
+        if kind == "mask":
+            M = self.mask_cover(side, art, grow)
+            return EMPTY if M is None else clean(gdiff(M, pierce))
+        if kind == "silk":
+            S = gdiff(art, pierce)
+            M = self.mask_cover(side)
+            if M is not None:
+                return clean(S) if self.opts.no_clip_silk else clean(ginter(S, M))
+            return clean(gdiff(S, holes))
+        if kind == "paste":
+            return clean(gdiff(art, holes_open))
+        return clean(art)
+
+    def copper_sheet(self, L: Layer, art):
+        """Copper as the model builds it (layer export): the image minus the
+        holes, bores and counterholes that reach into the layer; on an outer
+        layer the via caps close their holes (copper seen from outside)."""
+        cuts = [c.region for c in self.cuts if c.z_lo < L.z1 - EPS_Z and c.z_hi > L.z0 + EPS_Z]
+        side = "top" if L is self.stk.top_cu else "bottom" if L is self.stk.bot_cu else None
+        cuts += [circle(cn.x, cn.y, cn.r_wide) for cn in self.cones if side and cn.side == side]
+        g = gdiff(art, union_all(cuts)) if cuts else art
+        if side:
+            st, caps = self.stk.stack, []
+            for h in self.holes:
+                if (h.cap_top if side == "top" else h.cap_bot) <= 0 or \
+                        st[h.top_idx if side == "top" else h.bot_idx] is not L:
+                    continue
+                bore = h.bores.get(side)
+                # 2 um over the bore: its circle and a clearance drawn for it in
+                # the copper are polygons of their own, which would leave a hairline
+                caps.append((circle(h.x, h.y, bore[0]) if bore else h.region_drill()).buffer(0.002))
+            if caps:
+                g = union_all([g, ginter(union_all(caps), self.B)])
+        return clean(g)
 
     # .. preparation ..........................................................
     def prepare(self):
@@ -346,7 +407,7 @@ class Model:
             B = box(x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5)
         self.B = clean(B)
         self.svg["profile"] = self.B
-        self._drop_vias()
+        self._mark_undrilled()
         self._drop_backdrill_duplicates()
         self._place_holes()
         self._doc_layer_protection()
@@ -355,30 +416,86 @@ class Model:
         self._counter_and_backdrills()
         self._resolve_caps()
         self._resolve_tents()
+        self._surface_stubs()
         self._build_cuts()
 
-    def _drop_vias(self):
-        """--no-vias (default with --external-only): vias are not drilled; their
-        pads stay on the copper. Their back drills go with them."""
+    def _mark_undrilled(self):
+        """--vias undrilled (the default with --sanitize): vias are not drilled
+        and the core stays solid; their pads stay on the copper. The vias stay
+        in the hole list until their protection (fill, caps, tenting) is
+        resolved; _surface_stubs() then keeps what shows on the surface."""
         o = self.opts
         vias = getattr(o, "vias", None)
         if vias is None:
             vias = not getattr(o, "external_only", False)
-        if vias:
+        self.vias_drilled = bool(vias)
+        if not vias:
+            for h in self.holes:
+                if h.kind == "via":
+                    h.undrilled = True
+
+    def _surface_stubs(self):
+        """Undrilled vias leave the hole list. A cap that shows on the surface
+        stays: the via keeps a stub within the outer copper (cap, and the plating
+        and fill under it, or the filled back drill bore), as in the full model.
+        A cap under the solder mask cannot be seen and is left out, and so is one
+        where the copper (with --sanitize exposed/pads) has no land for it."""
+        und = [h for h in self.holes if h.undrilled]
+        if not und:
             return
-        gone = [h for h in self.holes if h.kind == "via"]
-        if not gone:
-            return
-        self.holes = [h for h in self.holes if h.kind != "via"]
-        idx = PointIndex(0.02)
-        for h in gone:
-            idx.add(h.x, h.y, h)
-        n_bd = len(self.board.backdrills)
-        self.board.backdrills = [b for b in self.board.backdrills if idx.find(b.x, b.y) is None]
-        self.hole_notes.append(f"vias not drilled: {len(gone)} via(s) left out"
-                               + (f" with {n_bd - len(self.board.backdrills)} back drill(s)"
-                                  if n_bd != len(self.board.backdrills) else "")
-                               + "; their pads stay (--vias to drill them)")
+        self.holes = [h for h in self.holes if not h.undrilled]
+        st = self.stk.stack
+        n = len(st)
+        kept, hidden = Counter(), 0
+        for side, li in (("top", 0), ("bottom", n - 1)):
+            L = st[li]
+            cap = "cap_top" if side == "top" else "cap_bot"
+            cand = [h for h in und if getattr(h, cap) > 0 and (h.top_idx if side == "top" else h.bot_idx) == li]
+            if not cand or L.kind != "copper":
+                continue
+            cover = self.mask_cover(side)
+            land = union_all([Polygon(p.exterior) for p in iter_polys(self.copper_image(L))])
+            for g in (cover, land):
+                if g is not None:
+                    shapely.prepare(g)
+            for h in cand:
+                if (cover is not None and shapely.contains_xy(cover, h.x, h.y)) or \
+                        not shapely.contains_xy(land, h.x, h.y):
+                    hidden += 1
+                    continue
+                s = copy.copy(h)
+                s.undrilled, s.stub, s.laser, s.dual, s.notes = False, True, False, None, []
+                s.top_idx = s.bot_idx = li
+                s.z_lo = s.z_lo_eff = L.z0
+                s.z_hi = s.z_hi_eff = L.z1
+                s.plug_top = s.plug_bot = 0.0
+                if side == "top":
+                    s.cap_bot, s.tent_bot = 0.0, False
+                else:
+                    s.cap_top, s.tent_top = 0.0, False
+                s.bores = {}
+                bore = h.bores.get(side)
+                if bore is not None:              # filled back drill bore: no plating left under the cap
+                    r_b = bore[0]
+                    if side == "top":
+                        s.bores["top"] = (r_b, L.z0)
+                        s.z_hi_eff = L.z0
+                    else:
+                        s.bores["bottom"] = (r_b, L.z1)
+                        s.z_lo_eff = L.z1
+                    self.cuts.append(Cut(circle(h.x, h.y, r_b), L.z0, L.z1, "backdrill", False, False, hole=s))
+                self.holes.append(s)
+                kept[side] += 1
+        n_bd = sum(1 for h in und if h.bores)
+        note = f"vias not drilled: {len(und)} via(s), the core stays solid and their pads stay"
+        if n_bd:
+            note += f" ({n_bd} of them back drilled)"
+        if kept:
+            note += "; caps kept on the surface: " + ", ".join(f"{k} on {sd}" for sd, k in kept.items()) + \
+                " (with the plating and fill under them, within the outer copper)"
+        if hidden:
+            note += f"; {hidden} cap(s) under the solder mask or off the copper left out"
+        self.hole_notes.append(note + " (--vias drilled to drill them)")
 
     def _surface(self, side):
         return self.stk.z_top if side == "top" else self.stk.z_bot
@@ -704,8 +821,9 @@ class Model:
         lo, hi = (z_end, surf) if side == "top" else (surf, z_end)
         filled = [h for h in holes if h.fill]
         pierce = not filled
-        self.cuts.append(Cut(circle(x, y, r), lo, hi, "backdrill", pierce and side == "top",
-                             pierce and side == "bottom", hole=filled[0] if filled else None))
+        if not (holes and all(h.undrilled for h in holes)):     # an undrilled via is not back drilled either
+            self.cuts.append(Cut(circle(x, y, r), lo, hi, "backdrill", pierce and side == "top",
+                                 pierce and side == "bottom", hole=filled[0] if filled else None))
         for h in holes:
             if h.fill:
                 if side == "top":
@@ -804,7 +922,7 @@ class Model:
         for (kind, d1, d2, val, side, spec) in rules:
             hit = 0
             for h in self.holes:
-                if abs(2 * h.r_fin - d1) > 0.005:
+                if h.undrilled or abs(2 * h.r_fin - d1) > 0.005:
                     continue
                 for sd in (("top", "bottom") if side == "both" else (side,)):
                     if kind == "counterbore":
@@ -942,7 +1060,9 @@ class Model:
                        f"(stub from {stub_src})")
             filled = [h for h in holes if h.fill]
             depth = self._add_backdrill(b.x, b.y, r, side, z_end, holes)
-            if filled:
+            if holes and all(h.undrilled for h in holes):
+                how += "; not drilled (the via is not drilled)"
+            elif filled:
                 capped = any((h.cap_top if side == "top" else h.cap_bot) for h in filled)
                 how += "; bore filled" + (" and capped" if capped else "") + " with the via"
             bgroups[(b.layer, round(b.d, 4), side, round(depth, 4), how, bool(holes))] += 1
@@ -1269,11 +1389,7 @@ class Model:
         masks = coats.get("mask", []) if not o.no_mask else []
         M = None
         if masks:
-            openings = union_all(self.image(L) for L in masks)
-            M = gdiff(self.B, openings)
-            tents = self._tent_region.get(side, EMPTY)
-            if not tents.is_empty:
-                M = union_all([M, ginter(tents, self.B)])
+            M = self.mask_cover(side)
             t_m = max(L.t for L in masks)
             lower = clean(gdiff(gdiff(M, C), holes))
             upper = clean(gdiff(M, pierce))
@@ -1335,7 +1451,7 @@ class Model:
         # solder paste
         pastes = coats.get("paste", []) if o.paste else []
         if pastes:
-            P = clean(gdiff(union_all(self.image(L) for L in pastes), holes))
+            P = clean(gdiff(union_all(self.image(L) for L in pastes), holes_open))
             t_p = max(L.t for L in pastes)
             z0 = z_cu + sg * t_f
             solids = Brep.prisms(P, *zr(z0, z0 + sg * t_p))
@@ -1574,6 +1690,8 @@ class Model:
         info("\nHoles:")
         groups = Counter()
         for h in self.holes:
+            if h.stub:
+                continue
             sp = f"{st.stack[h.top_idx].name}..{st.stack[h.bot_idx].name}"
             shape = "slot" if not h.round else "round"
             groups[(h.layer, sp, h.kind, shape, round(2 * h.r_fin, 4), round(2 * h.r_drill, 4), h.laser,
