@@ -175,6 +175,25 @@ def offset(geom, d: float):
     return clean(geom.buffer(d, join_style="mitre", mitre_limit=2.0))
 
 
+# Altium writes the board profile's arcs as chords outside the arc (vertices
+# 8 um beyond it), the layers' own arcs much finer: a layer drawn to the board
+# edge leaves a crescent up to that wide along the outline. Thinner than this:
+EDGE_SLIVER = 0.02  # mm
+
+
+def drop_edge_slivers(geom, B, w: float = EDGE_SLIVER):
+    """Remove the parts of a region along the outline that are narrower than w
+    (the gap between the profile's chords and a layer drawn to the true edge)."""
+    if geom.is_empty:
+        return geom
+    h = w / 2.0
+    opened = geom.buffer(-h, join_style="mitre", mitre_limit=2.0).buffer(h, join_style="mitre", mitre_limit=2.0)
+    thin = [p for p in iter_polys(gdiff(geom, opened)) if p.distance(B.boundary) <= w]
+    if not thin:
+        return geom
+    return clean(gdiff(geom, shapely.union_all(thin).buffer(1e-6)))
+
+
 def export(model, spec: str, opts, out_dir: str, base: str, output: Optional[str]) -> List[str]:
     name, formats = parse_export(spec, output)
     t = find_target(model, name)
@@ -197,6 +216,7 @@ def export(model, spec: str, opts, out_dir: str, base: str, output: Optional[str
         geom = clean(ginter(t.material(art, d), B))
         if inv:
             geom = clean(gdiff(B, geom))
+        geom = drop_edge_slivers(geom, B)
     if t.kind != "outline" and geom.is_empty:
         raise SystemExit(f"--export {name}{' --invert' if inv else ''}: the layer is empty")
     label = (t.fab if canon(name) == canon(t.fab) else t.generic) + ("_inverted" if inv else "")

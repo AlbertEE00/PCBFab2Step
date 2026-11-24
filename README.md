@@ -338,6 +338,12 @@ are counted in the report. Steps shorter than 0.1 um in the data (Altium
 rounds coordinates to 1e-7 inch where an arc meets a line) are removed
 first, so they cannot turn into spikes at a corner.
 
+Parts of an exported layer along the outline narrower than 20 um are left
+out: Altium writes the board profile's arcs as chords that lie outside the
+arc (up to about 8 um), while the layers are drawn to the true edge, so an
+inverted solder mask or copper would otherwise show a hairline along the
+board edge.
+
 DXF is R12 with closed polylines in mm (layer `OUTLINE` and a layer named
 after the target); arcs are polylines at the tessellation tolerance. SVG is
 in mm, the layer filled and the outline as a line.
@@ -392,6 +398,8 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 2.1.1: exports leave out slivers under 20 um wide along the outline (an
+  inverted solder mask showed a hairline along the board edge).
 - 2.1.0: layers are exported as they are on the board: `solder-*` is the
   solder mask (it was its openings), copper has its holes cut, silkscreen is
   clipped to the mask. `--invert` is back, for every layer (the mask

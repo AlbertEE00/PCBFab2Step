@@ -175,3 +175,16 @@ def test_stencil(tmp_path, odb_job):
     assert svg and stp
     text = open(os.path.join(out, stp[0]), errors="ignore").read()
     assert "stencil-bot (102 um)" in text
+
+
+def test_edge_slivers_dropped():
+    """A layer drawn to the true board edge leaves crescents between it and the
+    profile's chords: hairlines along the outline, gone from the export; a real
+    feature at the edge stays."""
+    import shapely
+    from pcbfab2step.geometry import gdiff
+    B = shapely.box(0, 0, 10, 10)
+    g = gdiff(B, shapely.box(0.005, 0, 10, 10))                              # 5 um strip along the edge
+    g = shapely.union_all([g, shapely.box(2, 2, 4, 4), shapely.box(9.8, 3, 10, 4)])
+    out = exports.drop_edge_slivers(g, B)
+    assert out.area == pytest.approx(4.0 + 0.2, abs=1e-4)
