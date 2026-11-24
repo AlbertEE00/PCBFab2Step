@@ -56,8 +56,14 @@ FAB/
   IPC2581/      IPC-2581 file
   NCDRILL/      NC drill output (.DRR report and drill files)
   GERBER/       (not read yet)
+  STEP/         the ECAD's STEP export (Altium: board + components)
   config.toml   settings, populated with the defaults
+  EXPORT/       written by pcbfab2step: the STEP model and layer exports
 ```
+
+The STEP model goes to `EXPORT/<board>.step` (for a single file or plain
+folder: `exports/` beside the input), so it never clashes with the ECAD's own
+STEP of the same name in `STEP/`. `-o` writes it elsewhere.
 
 Nothing depends on this layout: a single file always works, a plain folder is
 searched for ODB++ and IPC-2581 files, and a file given from a fab folder's
@@ -207,6 +213,24 @@ layer for checking.
 per-body validity, volume, z range and face types (and overlaps between
 bodies); `tools/section_plot.py` draws a cross-section.
 
+## Components
+
+The components of an ECAD STEP export are added to the model: Altium
+exports its parts on a simplified board body, and pcbfab2step puts the same
+parts on the real stackup. By default the newest `.step` in the fab folder's
+`STEP/` is used; `--components FILE` names one, `--no-components` leaves them
+out.
+
+- The board body is left out (named `Board`, else the body whose size matches
+  the outline). Every other part keeps its name, colours and XY placement;
+  if the board body is off the outline the parts are shifted with it.
+- In Z each part is put on the model's own outer surface (solder mask
+  included) on its side: parts above the ECAD board on the top, parts below
+  on the bottom, parts through it by the top. A different board thickness in
+  the ECAD export therefore never leaves parts floating or sunk in.
+- Each part becomes one body per colour (`R1: body`, `R1: terminals`, ...),
+  on the layers `COMPONENTS_TOP` / `COMPONENTS_BOTTOM`.
+
 ## Layer exports
 
 Any layer can be written on its own as DXF, SVG or STEP, in the board's own
@@ -295,6 +319,9 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 1.5.0: components from the ECAD STEP export (fab folder `STEP/`,
+  `--components`, `--no-components`) placed on the model's surfaces; the
+  STEP model is written to `EXPORT/` (or `exports/`) by default.
 - 1.4.0: layer exports (`--export`, short forms such as `--paste-dxf`,
   `--invert`, `--outline`, `--stencil-thickness`, `--use-generic-names`,
   `--no-step`): any layer as DXF, SVG or STEP with the model's origin, an

@@ -27,7 +27,7 @@ else:                                    # pragma: no cover
     tomllib = None
 
 CONFIG_NAME = "config.toml"
-FAB_SUBDIRS = ("ODB++", "IPC2581", "GERBER", "NCDRILL")
+FAB_SUBDIRS = ("ODB++", "IPC2581", "GERBER", "NCDRILL", "STEP")
 
 NAMED_COLORS = {
     "green": "#1b6e2d", "matte-green": "#2e5e33", "dark-green": "#0f4a1e", "blue": "#1f4e9c",
@@ -446,6 +446,8 @@ def config_template(version: str) -> str:
         "#   NCDRILL/   NC drill output (.DRR report and drill files): counterhole depths; read by default",
         "#              when present ([sources] ncdrill = false or --no-ncdrill to leave it out)",
         "#   GERBER/    Gerber files (not read yet)",
+        "#   STEP/      the ECAD's STEP export (Altium: board plus components): its components are added",
+        "#   EXPORT/    written by pcbfab2step: the STEP model and the layer exports",
     ]
     sections: List[str] = []
     for sec, *_ in SCHEMA:
@@ -483,7 +485,7 @@ def _kv(key: str, val, comment: str) -> str:
 
 
 def init_fab_folder(folder: str, version: str, force: bool = False) -> List[str]:
-    """Create a fab folder: ODB++/, IPC2581/, GERBER/, NCDRILL/ and config.toml."""
+    """Create a fab folder: ODB++/, IPC2581/, GERBER/, NCDRILL/, STEP/ and config.toml."""
     done = []
     os.makedirs(folder, exist_ok=True)
     for d in FAB_SUBDIRS:

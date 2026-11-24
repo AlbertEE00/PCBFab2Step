@@ -62,6 +62,12 @@ the layer names; files go to the fab folder's EXPORT/, else exports/ beside the 
   --no-step                                 exports only, no STEP model
   DXF/SVG include the outline unless --no-outline; STEP only with --outline.
 
+components (Altium STEP export: parts on a simplified board):
+  the newest .step in the fab folder's STEP/ by default; --components FILE, --no-components.
+  The ECAD board body is dropped and each part goes onto the model's surface on its side.
+
+output: <board>.step in the fab folder's EXPORT/ (else exports/ beside the input), or -o FILE
+
 hiding design detail:
   --external-only                           outer copper only, inner layers merged into one core;
                                             vias not drilled (--vias to drill them)
@@ -88,7 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EPILOG)
     p.add_argument("--version", action="version", version=f"pcbfab2step {__version__}")
     p.add_argument("inputs", nargs="+", metavar="INPUT", help="fab folder, ODB++, IPC-2581 or config.toml")
-    p.add_argument("-o", "--output", default=None, help="STEP file (default: <board>.step next to the input)")
+    p.add_argument("-o", "--output", default=None,
+                   help="STEP file (default: <board>.step in the fab folder's EXPORT/, else in exports/ beside "
+                        "the input)")
     p.add_argument("--list", action="store_true", help="print the stackup and hole report only, no STEP")
 
     s = p.add_argument_group("sources")
@@ -178,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
         cg.add_argument(f"--{key}-color", default=None, help=hlp)
 
     mg = p.add_argument_group("model content (hide design detail)")
+    mg.add_argument("--components", default=None, metavar="STEP",
+                    help="add the components of an ECAD STEP export (Altium: board body plus parts); default: "
+                         "the newest .step in the fab folder's STEP/")
+    mg.add_argument("--no-components", dest="components", action="store_const", const="",
+                    help="no components")
     mg.add_argument("--external-only", action="store_true",
                     help="outer copper only; the inner layers and dielectrics become one core body, like "
                          "Altium's STEP. Implies --no-vias unless --vias")
@@ -263,10 +276,15 @@ def _legacy(args):
 
 
 def default_output(primary: str, name: str, fab: Optional[str]) -> str:
-    folder = fab or os.path.dirname(os.path.abspath(primary.rstrip("/\\")))
-    if os.access(folder, os.W_OK):
-        return os.path.join(folder, name + ".step")
-    return os.path.join(os.getcwd(), name + ".step")
+    """<board>.step in the fab folder's EXPORT/, else in exports/ beside the input
+    (the fab folder's STEP/ holds the ECAD's own STEP of the same name)."""
+    from .exports import export_dir
+    folder = export_dir(fab, primary, None)
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        folder = os.getcwd()
+    return os.path.join(folder, name + ".step")
 
 
 def convert(args) -> int:
@@ -370,6 +388,15 @@ def convert(args) -> int:
     if out and "output" in opts.sources and not opts.sources["output"].startswith("--") and srcs.config:
         out = os.path.join(os.path.dirname(os.path.abspath(srcs.config)), out)
     out = out or default_output(srcs.primary_path, board.name, srcs.fab)
+    comp_src = args.components if args.components is not None else (srcs.step_files[0] if srcs.step_files else "")
+    if comp_src and os.path.abspath(comp_src) != os.path.abspath(out):
+        from . import components
+        st = model.stk
+        t_mask = {side: (0.0 if opts.no_mask else max((L.t for L in st.coats[side].get("mask", [])), default=0.0))
+                  for side in ("top", "bottom")}
+        info("\nComponents:")
+        parts, _ = components.read(comp_src, model.B.bounds, st.z_top + t_mask["top"], st.z_bot - t_mask["bottom"])
+        model.components += parts
     info(f"Writing {out} ...")
     root = f"{board.name} {board.step}".strip()
     write_step(out, root, model.components, opts.schema, fmt=LABEL[srcs.primary])

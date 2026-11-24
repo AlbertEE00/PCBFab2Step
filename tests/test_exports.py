@@ -66,3 +66,25 @@ def test_external_only(ipc_file, opts):
     names = [c["name"] for c in m.components]
     assert any(n.startswith("Core (") for n in names)
     assert not any(n.startswith(("MID", "CORE (", "PP 1")) for n in names)    # inner layers merged
+
+
+def test_components_from_ecad_step(tmp_path, ipc_file):
+    """An ECAD STEP (board body + a part under it) in the fab folder's STEP/:
+    the part is added on the model's bottom surface, the board body left out."""
+    pytest.importorskip("OCP")
+    from pcbfab2step.brep import OCC, Brep, write_step
+    from shapely.geometry import box
+    OCC.load()
+    fab = tmp_path / "FAB"
+    main(["init", str(fab)])
+    (fab / "IPC2581" / "board.cvg").write_bytes(open(ipc_file, "rb").read())
+    (fab / "STEP").mkdir(exist_ok=True)               # init creates it
+    b = Brep.prisms(box(0, 0, 40, 30), -1.6, 0.0)            # ECAD frame: top at z=0
+    part = Brep.prisms(box(5, 5, 8, 7), -2.6, -1.6)           # under the board
+    write_step(str(fab / "STEP" / "board.step"), "PCB",
+               [{"name": "Board", "color": (0, 0.5, 0), "solids": b},
+                {"name": "U1", "color": (0.1, 0.1, 0.1), "solids": part}])
+    assert main([str(fab), "-q"]) == 0
+    out = next((fab / "EXPORT").glob("*.step"))
+    text = out.read_text(errors="ignore")
+    assert "'U1'" in text and "'Board'" not in text

@@ -26,6 +26,8 @@ SUBDIRS: Dict[str, tuple] = {
     "ipc2581": ("ipc2581", "ipc-2581", "ipc_2581", "ipc"),
     "ncdrill": ("ncdrill", "nc_drill", "nc-drill", "nc drill", "nc", "drill"),
     "gerber": ("gerber", "gerbers"),
+    "step": ("step", "3d", "mcad"),                   # Altium's STEP export: its components are added
+    "export": ("export", "exports"),                  # our own output
 }
 ALL_SUBDIRS = {n for v in SUBDIRS.values() for n in v}
 LABEL = {"odb": "ODB++", "ipc2581": "IPC-2581"}
@@ -40,6 +42,7 @@ class Sources:
     config: Optional[str] = None
     ncdrill_dirs: List[str] = field(default_factory=list)
     gerber: bool = False
+    step_files: List[str] = field(default_factory=list)   # ECAD STEP exports (STEP/), newest first
     notes: List[str] = field(default_factory=list)
     primary: str = ""
     primary_path: str = ""
@@ -209,6 +212,10 @@ def discover(inputs: List[str], config: Optional[str] = None, no_config: bool = 
             s.ncdrill_dirs.append(nd)
         gd = _subdir(f, "gerber")
         s.gerber = bool(gd and os.listdir(gd))
+        sd = _subdir(f, "step")
+        if sd:
+            s.step_files = sorted((os.path.join(sd, e) for e in os.listdir(sd)
+                                   if e.lower().endswith((".step", ".stp"))), key=os.path.getmtime, reverse=True)
         if s.config is None and os.path.isfile(os.path.join(f, CONFIG_NAME)):
             s.config = os.path.join(f, CONFIG_NAME)
     s.odb = s.explicit["odb"] + [p for p in s.odb if p not in s.explicit["odb"]]
