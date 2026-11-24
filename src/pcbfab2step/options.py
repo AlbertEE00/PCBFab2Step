@@ -49,6 +49,8 @@ FLAGS = {
                "clearances in the copper (--invert)", ()),
     "outline": ("choice", "Board outline", "DXF and SVG have it unless left out; a STEP layer only with it (the "
                 "PCB body) (--outline / --no-outline)", ("with", "without")),
+    "format": ("choice", "Format", "the model as STEP or as a mesh file (--format)",
+               ("step", "glb", "gltf", "obj", "fbx", "stl", "ply", "3mf")),
 }
 
 LABELS = {
@@ -67,16 +69,19 @@ LABELS = {
     "odb_step": "ODB++ step", "schema": "STEP protocol", "svg_dir": "Region SVGs to", "rout": "Rout layers",
     "arc_tolerance": "Arc tolerance", "arc_fit": "Arc fit", "max_holes_per_face": "Holes per face",
     "aperture_offset": "Aperture offset", "stencil_thickness": "Stencil thickness",
+    "silk_simplify": "Simplify", "silk_body": "Body", "simplify": "Simplify", "hide_bodies": "Bodies",
+    "mesh_from": "Meshes from",
 }
 
 # (id, title, switch option or None, options): the order of the GUI and of the command line
 GROUPS = [
     ("sanitize", "Sanitize", "sanitize", ["sanitize"]),
     ("mask", "Solder mask", "mask", ["mask_color", "mask_thickness", "drill_through_mask"]),
-    ("silk", "Silkscreen", "silk", ["silk_color", "silk_thickness", "clip_silk"]),
+    ("silk", "Silkscreen", "silk", ["silk_color", "silk_thickness", "clip_silk", "silk_simplify", "silk_body"]),
     ("finish", "Surface finish", "finish", ["finish_type", "finish_color", "finish_thickness"]),
     ("paste", "Solder paste", "paste", ["paste_color", "paste_thickness"]),
     ("components", "Components", "components", []),
+    ("bodies", "Bodies left out", None, ["hide_bodies"]),
     ("stack", "Copper and laminate", None, ["copper_color", "copper_thickness", "board_color", "board_thickness",
                                             "layer_thickness"]),
     ("vias", "Vias", None, ["vias_drilled", "via_fill", "via_cap", "via_tent", "via_plug", "via_max_diameter",
@@ -87,8 +92,8 @@ GROUPS = [
                                             "counterhole_depth_mode", "counterbore_rules", "countersink_rules"]),
     ("backdrill", "Back drills", None, ["backdrill_stub"]),
     ("sources", "Sources", None, ["use_sources", "odb_step", "config", "no_config"]),
-    ("file", "STEP file", None, ["schema", "svg_dir"]),
-    ("geometry", "Geometry", None, ["rout", "arc_tolerance", "arc_fit", "max_holes_per_face"]),
+    ("file", "Output file", None, ["schema", "mesh_from", "svg_dir"]),
+    ("geometry", "Geometry", None, ["simplify", "rout", "arc_tolerance", "arc_fit", "max_holes_per_face"]),
 ]
 EXPORT_GROUP = ["invert", "outline", "aperture_offset", "stencil_thickness"]
 
@@ -138,6 +143,8 @@ def flag_hint(attr: str) -> str:
     if attr in COUNTERHOLE_FLAG:
         return f"{COUNTERHOLE_FLAG[attr]} type=bore|sink,angle=DEG,depth=SIZE"
     hints = {"sanitize": "--sanitize outer|exposed|pads", "use_sources": "--sources LIST", "config": "--config FILE",
+             "format": "--format step|glb|gltf|obj|fbx|stl|ply|3mf",
+             "hide_bodies": "--hide silk-bot,solder-top,copper-2,components-top,U1,...",
              "no_config": "--no-config", "vias_drilled": "--vias drilled|undrilled", "via_protection": "--vias RULE",
              "layer_thickness": "--thickness LAYER=SIZE", "aperture_offset": "--aperture-offset SIZE",
              "invert": "--invert", "outline": "--outline / --no-outline"}
@@ -244,17 +251,20 @@ def build_argv(inputs: List[str], output: Optional[str], values: Dict[str, objec
     argv = [str(p) for p in inputs]
     if output and not export:
         argv += ["-o", str(output)]
+    fmt = values.get("format")
+    if fmt and fmt != "step" and not export:
+        argv += ["--format", str(fmt)]
     if export:
         argv += ["--export", export]
     else:
         shown = [a for a in SHOW if values.get(a) is True]
-        hidden = [a for a in SHOW if values.get(a) is False]
+        hidden = [a for a in SHOW if values.get(a) is False] + _lines(str(values.get("hide_bodies") or "").replace(",", "\n"))
         if shown:
             argv += ["--show", ",".join(shown)]
         if hidden:
             argv += ["--hide", ",".join(hidden)]
     for attr in ordered_attrs():
-        if attr in SHOW or attr not in values:
+        if attr in SHOW or attr not in values or attr == "hide_bodies":
             continue
         v = values[attr]
         if v is None or v == "" or (isinstance(v, (list, tuple)) and not v):
@@ -317,6 +327,10 @@ def parse_argv(argv: List[str]) -> dict:
     for attr, (sec, key, kind, builtin, tmpl, help_) in SETTING.items():
         if attr in ("output",) or attr not in vars(c):
             continue
+        if attr == "hide_bodies":
+            if c.hide_bodies:
+                values[attr] = "\n".join(c.hide_bodies)
+            continue
         v = getattr(c, attr)
         if attr == "use_sources":
             values[attr] = str(v)
@@ -345,5 +359,7 @@ def parse_argv(argv: List[str]) -> dict:
         values["invert"] = True
     if args.outline is not None:
         values["outline"] = "with" if args.outline else "without"
+    if getattr(args, "format", None):
+        values["format"] = args.format
     return dict(inputs=list(args.inputs), output=args.output, values=values, export=args.export,
                 view=getattr(args, "view", None))

@@ -48,27 +48,75 @@ export function mountChrome(viewport, viewer, opts = {}) {
   const picked = h("div", { class: "picked", hidden: true });
   const press = (b, on) => b.setAttribute("aria-pressed", on ? "true" : "false");
 
-  const views = h("div", { class: "seg", role: "group", "aria-label": "View" },
-    ...[["iso", "Iso"], ["top", "Top"], ["bottom", "Bottom"], ["front", "Front"], ["right", "Side"]].map(([v, label]) =>
+  // popovers above the tool bar
+  const pops = [];
+  function popover(btn, panel) {
+    panel.classList.add("pop");
+    panel.hidden = true;
+    pops.push([btn, panel]);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = panel.hidden;
+      for (const [b, p] of pops) { p.hidden = true; if (b !== btn) b.classList.remove("open"); }
+      panel.hidden = !open;
+      btn.classList.toggle("open", open);
+      if (open) place(btn, panel);
+    });
+    panel.addEventListener("click", (e) => e.stopPropagation());
+  }
+  function place(btn, panel) {
+    const vr = viewport.getBoundingClientRect(), br = btn.getBoundingClientRect();
+    panel.style.left = `${Math.max(8, Math.min(br.left - vr.left, vr.width - panel.offsetWidth - 8))}px`;
+  }
+  document.addEventListener("click", () => { for (const [b, p] of pops) { p.hidden = true; b.classList.remove("open"); } });
+
+  const ISOS = [["Front right", "iso"], ["Front left", "iso-front-left"], ["Back right", "iso-back-right"], ["Back left", "iso-back-left"]];
+  const isoBtn = h("button", { class: "tb", title: "Isometric views: from the corners above and below" }, "Iso ▾");
+  const isoPanel = h("div", { class: "isopanel", role: "menu", "aria-label": "Isometric views" },
+    h("span", { class: "lbl" }, "From above"), ...ISOS.map(([label, v]) => h("button", { class: "tb", role: "menuitem", on: { click: () => { viewer.view(v); isoPanel.hidden = true; isoBtn.classList.remove("open"); } } }, label)),
+    h("span", { class: "lbl" }, "From below"), ...ISOS.map(([label, v]) => h("button", { class: "tb", role: "menuitem", on: { click: () => { viewer.view(v === "iso" ? "iso-below-front-right" : v.replace("iso-", "iso-below-")); isoPanel.hidden = true; isoBtn.classList.remove("open"); } } }, label)));
+  popover(isoBtn, isoPanel);
+
+  const views = h("div", { class: "seg", role: "group", "aria-label": "View" }, isoBtn,
+    ...[["top", "Top"], ["bottom", "Bottom"], ["front", "Front"], ["right", "Side"]].map(([v, label]) =>
       h("button", { class: "tb", title: `${label} view`, on: { click: () => viewer.view(v) } }, label)),
     h("button", { class: "tb", title: "Fit the board in the window (F)", on: { click: () => viewer.fit() } }, "Fit"));
 
-  const axes = ["x", "y", "z"].map((a) => h("button", { class: "tb", "aria-pressed": "false", title: `Section across ${a.toUpperCase()}` }, a.toUpperCase()));
-  const slider = h("input", { type: "range", min: "0", max: "1000", value: "500", disabled: true, "aria-label": "Section position" });
-  const flip = h("button", { class: "tb", disabled: true, title: "Keep the other side of the cut" }, "Flip");
-  let axis = null, flipped = false;
+  // section: axis, position, turn about the board's normal, tilt out of its plane
+  const sec = { axis: null, t: 0.5, flip: false, turn: 0, tilt: 0, last: "x" };
+  const secBtn = h("button", { class: "tb", "aria-pressed": "false", title: "Cut the board open" }, "Section ▾");
+  const axes = ["x", "y", "z"].map((a) => h("button", { class: "tb", "aria-pressed": "false", title: `Cut across ${a.toUpperCase()}` }, a.toUpperCase()));
+  const flip = h("button", { class: "tb", "aria-pressed": "false", title: "Keep the other side of the cut" }, "Flip");
+  const off = h("button", { class: "tb", title: "No section" }, "Off");
+  const slider = (min, max, val, label) => h("input", { type: "range", min: String(min), max: String(max), value: String(val), "aria-label": label });
+  const pos = slider(0, 1000, 500, "Section position");
+  const turn = slider(-90, 90, 0, "Turn the cut");
+  const tilt = slider(-80, 80, 0, "Tilt the cut");
+  const turnVal = h("span", { class: "val" }, "0°"), tiltVal = h("span", { class: "val" }, "0°");
   const applySection = () => {
-    axes.forEach((b, i) => press(b, axis === "xyz"[i]));
-    slider.disabled = flip.disabled = !axis;
-    viewer.setSection(axis, slider.value / 1000, flipped);
+    sec.t = pos.value / 1000;
+    sec.turn = +turn.value;
+    sec.tilt = +tilt.value;
+    turnVal.textContent = `${sec.turn}°`;
+    tiltVal.textContent = `${sec.tilt}°`;
+    axes.forEach((b, i) => press(b, sec.axis === "xyz"[i]));
+    press(secBtn, !!sec.axis);
+    press(flip, sec.flip);
+    viewer.setSection(sec.axis, sec.t, sec.flip, sec.turn, sec.tilt);
   };
-  axes.forEach((b, i) => b.addEventListener("click", () => {
-    axis = axis === "xyz"[i] ? null : "xyz"[i];
-    applySection();
-  }));
-  slider.addEventListener("input", applySection);
-  flip.addEventListener("click", () => { flipped = !flipped; press(flip, flipped); applySection(); });
-  const section = h("div", { class: "seg", role: "group", "aria-label": "Section" }, h("label", {}, "Section "), ...axes, slider, flip);
+  axes.forEach((b, i) => b.addEventListener("click", () => { sec.axis = sec.last = "xyz"[i]; applySection(); }));
+  flip.addEventListener("click", () => { sec.flip = !sec.flip; if (!sec.axis) sec.axis = sec.last; applySection(); });
+  off.addEventListener("click", () => { sec.axis = null; applySection(); });
+  for (const r of [pos, turn, tilt]) r.addEventListener("input", () => { if (!sec.axis) sec.axis = sec.last; applySection(); });
+  for (const [r, v] of [[turn, turnVal], [tilt, tiltVal]]) r.addEventListener("dblclick", () => { r.value = "0"; applySection(); });
+  const secPanel = h("div", { class: "secpanel", "aria-label": "Section" },
+    h("div", { class: "row" }, h("span", { class: "lbl" }, "Across"), h("div", { class: "seg" }, ...axes), h("span", { class: "grow" }), flip, off),
+    h("label", { class: "row" }, h("span", { class: "lbl" }, "Position"), pos, h("span", { class: "val" })),
+    h("label", { class: "row", title: "Turn the cut about the board's normal (double-click: 0)" }, h("span", { class: "lbl" }, "Turn"), turn, turnVal),
+    h("label", { class: "row", title: "Tilt the cut out of its plane: an oblique cut (double-click: 0)" }, h("span", { class: "lbl" }, "Tilt"), tilt, tiltVal));
+  popover(secBtn, secPanel);
+  secBtn.addEventListener("click", () => { if (!sec.axis && !secPanel.hidden) { sec.axis = sec.last; applySection(); } });
+  const section = h("div", { class: "seg", role: "group", "aria-label": "Section" }, secBtn);
 
   const edges = h("button", { class: "tb", "aria-pressed": "true", title: "Draw the edges (E)" }, "Edges");
   edges.addEventListener("click", () => { viewer.setEdges(!viewer.edges); press(edges, viewer.edges); });
@@ -85,7 +133,7 @@ export function mountChrome(viewport, viewer, opts = {}) {
   bodiesBtn.addEventListener("click", () => toggleBodies(bodies.hidden));
 
   if (opts.caption !== false) viewport.append(caption);
-  viewport.append(picked, bodies, toolbar);
+  viewport.append(picked, bodies, toolbar, isoPanel, secPanel);
 
   const rows = new Map();
   function fill() {
@@ -111,6 +159,8 @@ export function mountChrome(viewport, viewer, opts = {}) {
             const ks = new Set(viewer.hiddenKinds);
             ks.delete(p.rec.kind);
             viewer.setHiddenKinds([...ks]);
+          } else if (viewer._hiddenByName(p)) {   // left out by name: show it to look at it
+            viewer.setHiddenNames([...viewer.hideNames].filter((n) => !(p.rec.names || []).includes(n)));
           } else viewer.setPartHidden(p.rec.id, !p.viewHidden);
           sync();
         });

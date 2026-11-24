@@ -33,6 +33,89 @@ def safe_name(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*]+', "_", s).strip()
 
 
+# --------------------------------------------------------------------------
+# bodies by name (--hide silk-bot, copper-2, components-top, U1, a layer name)
+# --------------------------------------------------------------------------
+
+def canon(s) -> str:
+    return re.sub(r"[\s_\-]+", "", str(s).strip().lower())
+
+
+KIND_WORDS = {"mask": ("mask", "solder", "soldermask"), "silk": ("silk", "silkscreen", "overlay"),
+              "finish": ("finish",), "paste": ("paste",), "copper": ("copper",),
+              "component": ("components", "component", "parts"), "fill": ("fill", "via-fill"),
+              "cap": ("cap", "via-cap"), "plug": ("plug", "via-plug"), "plating": ("plating",),
+              "dielectric": ("dielectric",), "core": ("core",)}
+SIDE_WORDS = {"top": ("top",), "bottom": ("bot", "bottom")}
+
+
+def body_names(c: dict, copper_index: Optional[dict] = None) -> List[str]:
+    """Every name a body answers to (canonical): kind, kind-side, copper-N,
+    its layer's name in the fab data; ECAD parts: components-top/bot and the
+    designator."""
+    path = tuple(c.get("path") or ())
+    kind, side = c.get("kind") or "", c.get("side") or ""
+    if path and path[0].startswith("Components"):
+        kind = "component"
+        side = "top" if path[0].endswith("top") else "bottom"
+    words = KIND_WORDS.get(kind, (kind,) if kind else ())
+    names = {canon(w) for w in words}
+    for w in words:
+        for sd in SIDE_WORDS.get(side, ()):
+            names.add(canon(f"{w}-{sd}"))
+    if kind == "component":
+        if len(path) > 1:
+            names.add(canon(path[1]))
+    elif c.get("layer"):
+        names.add(canon(c["layer"]))
+    if kind == "copper" and copper_index and c.get("layer") in copper_index:
+        names.add(f"copper{copper_index[c['layer']]}")
+    names.discard("")
+    return sorted(names)
+
+
+def components_side(name: str) -> Optional[str]:
+    """'components-top' -> top, 'components-bot' -> bottom, else None."""
+    c = canon(name)
+    for k in ("components", "component", "parts"):
+        if c.startswith(k):
+            rest = c[len(k):]
+            return {"top": "top", "bot": "bottom", "bottom": "bottom"}.get(rest)
+    return None
+
+
+def copper_index(model) -> dict:
+    return {L.name: n for n, L in enumerate([L for L in model.stk.stack if L.kind == "copper"], 1)}
+
+
+def hide_set(opts) -> set:
+    return {canon(x) for x in (getattr(opts, "hide_bodies", None) or [])} - \
+        {canon(x) for x in (getattr(opts, "show_bodies", None) or [])}
+
+
+def drop_hidden(comps: list, model, opts, report: bool = True) -> list:
+    """The bodies the --hide names leave; a name that matches nothing is reported."""
+    hide = hide_set(opts)
+    if not hide:
+        return comps
+    idx = copper_index(model)
+    keep, used = [], set()
+    for c in comps:
+        hit = hide.intersection(body_names(c, idx))
+        if hit:
+            used |= hit
+        else:
+            keep.append(c)
+    if report:
+        for name in sorted(hide - used):
+            warn(f"--hide {name}: no body of that name (silk-bot, solder-top, copper-2, components-top, a "
+                 "designator or a layer name)")
+        if used:
+            info(f"  left out: {len(comps) - len(keep)} bod{'y' if len(comps) - len(keep) == 1 else 'ies'} "
+                 f"({', '.join(sorted(used))})")
+    return keep
+
+
 class Session:
     """What jobs share: boards read from the fab data (the expensive part)."""
 
@@ -80,6 +163,7 @@ class Job:
         opts.external_only = opts.sanitize != "none"
         opts.outer_copper = {"exposed": "exposed", "pads": "pads"}.get(opts.sanitize, "all")
         opts.vias = cli.vias_drilled
+        opts.show_bodies = list(getattr(cli, "show_bodies", []) or [])
         opts.export_outline = getattr(args, "outline", None)
         opts.export_invert = getattr(args, "invert", False)
         choose(srcs, opts.use_sources)
@@ -167,6 +251,17 @@ class Job:
         return safe_name(self.read().name)
 
     # .. outputs ..............................................................
+    def model_format(self) -> str:
+        """step, or a mesh format: --format, else the -o file's extension."""
+        from .meshfile import FORMATS
+        fmt = getattr(self.args, "format", None)
+        ext = os.path.splitext(self.opts.output or "")[1].lstrip(".").lower()
+        ext = "step" if ext in ("stp", "step", "") else ext
+        if fmt and ext != "step" and fmt != ext:
+            raise SystemExit(f"--format {fmt} but -o {self.opts.output}: give one of them")
+        fmt = fmt or (ext if ext in FORMATS else "step")
+        return "step" if fmt == "stp" else fmt
+
     def model_path(self) -> str:
         o, s = self.opts, self.srcs
         out = o.output
@@ -174,8 +269,76 @@ class Job:
             out = os.path.join(os.path.dirname(os.path.abspath(s.config)), out)
         if not out:
             suffix = f"_sanitized-{o.sanitize}" if o.sanitize != "none" else ""
-            out = os.path.join(s.out_dir, f"{self.base}{suffix}.step")
+            out = os.path.join(s.out_dir, f"{self.base}{suffix}.{self.model_format()}")
         return out
+
+    def write_mesh(self) -> List[str]:
+        """The model as a mesh file (glb, obj, fbx, ...): the preview's meshes, or
+        with output.mesh = exact the STEP's own solids tessellated."""
+        from . import meshfile, scene
+        fmt = self.model_format()
+        exact = getattr(self.opts, "mesh_from", "preview") == "exact"
+        info(f"\nMaking the {meshfile.LABELS[fmt]} meshes" + (" from the solids" if exact else "") + " ...")
+        sc = scene.model_scene(self, exact=exact)
+        hide = hide_set(self.opts)
+        parts = [p for p in sc.parts if p.kind not in sc.hidden and not hide.intersection(p.names)]
+        out = self.model_path()
+        os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+        m = self.read()
+        return meshfile.write(out, parts, f"{m.name} {m.step}".strip(), fmt)
+
+    def component_parts(self, side: str, exact: bool = True) -> list:
+        """The ECAD STEP's parts on one side (top, bottom), placed as in the model:
+        B-rep solids (exact) or the viewer's meshes."""
+        from . import components
+        if not self.srcs.step:
+            raise SystemExit("components: no ECAD STEP export found (give one as an input)")
+        m = self.prepare()
+        o, st = self.opts, m.stk
+        t_mask = {sd: (0.0 if o.no_mask else max((L.t for L in st.coats[sd].get("mask", [])), default=0.0))
+                  for sd in ("top", "bottom")}
+        if exact:
+            parts = components.read(self.srcs.step, m.B.bounds, st.z_top + t_mask["top"],
+                                    st.z_bot - t_mask["bottom"]) or []
+        else:
+            from .scene import job_components
+            parts = job_components(self, m)
+        want = "Components top" if side == "top" else "Components bottom"
+        got = [p for p in parts if tuple(p.get("path") or ())[:1] == (want,)]
+        if not got:
+            raise SystemExit(f"components-{'top' if side == 'top' else 'bot'}: no components on the {side} side")
+        return got
+
+    def write_components(self, side: str, formats: List[str]) -> List[str]:
+        from . import meshfile
+        from .brep import write_step
+        from .scene import _parts_from_components
+        written = []
+        label = f"components-{'top' if side == 'top' else 'bot'}"
+        for fmt in formats:
+            out = self._export_path(label, fmt, formats)
+            os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+            if fmt == "step":
+                info(f"Writing {out} ...")
+                from .sources import LABEL
+                write_step(out, f"{self.read().name} {label}", self.component_parts(side, exact=True),
+                           self.opts.schema, fmt=LABEL[self.srcs.primary])
+                written.append(out)
+            elif fmt in meshfile.FORMATS:
+                parts = _parts_from_components(self.component_parts(side, exact=False))
+                written += meshfile.write(out, parts, f"{self.read().name} {label}", fmt)
+            else:
+                raise SystemExit(f"--export {label}:{fmt}: components are written as STEP or a mesh format "
+                                 f"({', '.join(meshfile.FORMATS)})")
+        return written
+
+    def _export_path(self, label: str, fmt: str, formats: List[str]) -> str:
+        output = self.args.output
+        if output and len(formats) == 1:
+            return output
+        if output:
+            return os.path.splitext(output)[0] + "." + fmt
+        return os.path.join(self.srcs.out_dir, f"{self.base}_{label}.{fmt}")
 
     def build(self):
         """The B-rep solids, with the ECAD STEP's components."""
@@ -201,6 +364,7 @@ class Job:
                 for c in m.components:
                     c["path"] = ("PCB",)
                 m.components += parts
+        m.components = drop_hidden(m.components, m, self.opts)
         self.built = True
         return m
 
@@ -218,6 +382,10 @@ class Job:
 
     def write_export(self) -> List[str]:
         from . import exports
-        m = self.prepare()
+        name, formats = exports.parse_export(self.args.export, self.args.output)
+        side = components_side(name)
         os.makedirs(self.srcs.out_dir, exist_ok=True)
+        if side:
+            return self.write_components(side, formats)
+        m = self.prepare()
         return exports.export(m, self.args.export, self.opts, self.srcs.out_dir, self.base, self.args.output)

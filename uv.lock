@@ -625,7 +625,7 @@ wheels = [
 
 [[package]]
 name = "pcbfab2step"
-version = "2.2.0"
+version = "2.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "cadquery-ocp" },

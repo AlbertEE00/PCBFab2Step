@@ -8,12 +8,21 @@
 
 body.app {
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr) 312px;
+  grid-template-columns: var(--side-w, 340px) 7px minmax(0, 1fr) 7px var(--layers-w, 312px);
   grid-template-rows: minmax(0, 1fr) auto;
-  grid-template-areas: "side view layers" "cmd cmd cmd";
+  grid-template-areas: "side s1 view s2 layers" "cmd cmd cmd cmd cmd";
   height: 100vh;
   overflow: hidden;
 }
+
+/* the handles between the panels: drag to resize, double-click for the default */
+.split { position: relative; cursor: col-resize; touch-action: none; background: var(--panel); }
+.split.s1 { grid-area: s1; border-left: 1px solid var(--line); background: linear-gradient(90deg, var(--panel), var(--bg)); }
+.split.s2 { grid-area: s2; border-right: 1px solid var(--line); background: linear-gradient(270deg, var(--panel), var(--bg)); }
+.split::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 3px; border-radius: 2px; background: transparent; transition: background 0.12s; }
+.split:hover::after, .split.drag::after, .split:focus-visible::after { background: var(--gold); }
+.split:focus-visible { outline: none; }
+body.resizing, body.resizing * { cursor: col-resize !important; user-select: none; }
 
 .side { grid-area: side; }
 .app > .viewport { grid-area: view; }
@@ -26,8 +35,6 @@ body.app {
   overflow-x: hidden;
   min-height: 0;
 }
-.side { border-right: 1px solid var(--line); }
-.layers { border-left: 1px solid var(--line); }
 
 /* ---- shared bits -------------------------------------------------------- */
 
@@ -109,6 +116,7 @@ body.dragging .drop, .drop.over { border-color: var(--gold-line); background: co
 .addpath { display: flex; gap: 6px; margin-top: 8px; }
 
 .out { display: flex; gap: 6px; }
+.out select { flex: none; width: 76px; }
 
 /* ---- left: options ------------------------------------------------------ */
 
@@ -209,7 +217,13 @@ body.dragging .drop, .drop.over { border-color: var(--gold-line); background: co
 .xopts .opt.set::before { left: -10px; }
 
 .stack { list-style: none; margin: 0; padding: 8px 0 24px; }
-.stack li { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 0 10px; align-items: center; padding: 0 16px 0 16px; }
+.stack li { position: relative; display: grid; grid-template-columns: 16px 14px minmax(0, 1fr) auto; gap: 0 8px; align-items: center; padding: 0 16px 0 10px; }
+.stack .inc { width: 14px; height: 14px; margin: 0; accent-color: var(--gold); cursor: pointer; }
+.stack li.out .band { opacity: 0.25; }
+.stack li.out .nm, .stack li.out .th { color: var(--ink-3); }
+.stack li.out .nm b { color: var(--ink-3); font-weight: 400; text-decoration: line-through; text-decoration-color: var(--ink-3); }
+.stack li.components .band { background: #6f7e92 repeating-linear-gradient(45deg, transparent 0 3px, rgba(255, 255, 255, 0.22) 3px 5px) !important; }
+.stack .acts select.fmt { width: auto; height: 26px; }
 .stack .band { align-self: stretch; border-radius: 1px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); }
 .stack .nm { padding: 5px 0; min-width: 0; }
 .stack .nm b { font-weight: 500; }
@@ -223,7 +237,7 @@ body.dragging .drop, .drop.over { border-color: var(--gold-line); background: co
 .stack li.sel { background: var(--panel-2); }
 .stack li.sel::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--gold); }
 .stack li.outline { margin-bottom: 8px; }
-.stack .acts { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 2px 0 8px; }
+.stack .acts { grid-column: 3 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 2px 0 8px; }
 .stack .acts .btn.small { padding: 0 9px; }
 .stack .acts .seg { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: var(--bg); }
 .stack .acts .seg button { height: 24px; padding: 0 7px; border: 0; border-radius: 5px; background: none; cursor: pointer; font-size: 12px; color: var(--ink-2); }
@@ -262,6 +276,4 @@ body.dragging .drop, .drop.over { border-color: var(--gold-line); background: co
 .done { display: flex; gap: 8px; align-items: center; padding: 6px 16px 0; font-size: 12px; }
 .done:empty { display: none; }
 
-@media (max-width: 1180px) {
-  body.app { grid-template-columns: 300px minmax(0, 1fr) 270px; }
-}
+

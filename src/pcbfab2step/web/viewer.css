@@ -153,6 +153,32 @@ button, input, select { font: inherit; color: inherit; }
 .toolbar input[type="range"] { width: 120px; accent-color: var(--gold); }
 .toolbar label { color: var(--ink-2); font-size: 12px; }
 
+.tb.open:not([aria-pressed="true"]) { background: var(--panel-2); }
+
+/* ---- popovers above the tool bar --------------------------------------- */
+
+.pop {
+  position: absolute;
+  bottom: 62px;
+  z-index: 5;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bar);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.pop[hidden] { display: none; }
+.pop .lbl { color: var(--ink-2); font-size: 12px; }
+.isopanel { display: grid; grid-template-columns: auto repeat(4, auto); gap: 4px 2px; align-items: center; }
+.isopanel .lbl { padding-right: 8px; }
+.secpanel { width: 330px; display: grid; gap: 6px; }
+.secpanel .row { display: grid; grid-template-columns: 62px minmax(0, 1fr) 40px; gap: 8px; align-items: center; }
+.secpanel .row:first-child { display: flex; gap: 6px; }
+.secpanel .grow { flex: 1; }
+.secpanel input[type="range"] { width: 100%; accent-color: var(--gold); }
+.secpanel .val { color: var(--ink-2); font-size: 12px; text-align: right; }
+
 /* ---- bodies drawer ----------------------------------------------------- */
 
 .bodies {

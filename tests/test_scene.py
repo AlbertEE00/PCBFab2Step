@@ -121,6 +121,22 @@ def test_feature_edges():
     assert len(m.edges) == 12                                 # the box's edges, no face diagonals
 
 
+def test_feature_edges_of_touching_bodies():
+    """Two blocks stacked face to face (a solder mask's lower and upper part)
+    share the triangles where they meet: that face and its seam are inside
+    the material and draw no line."""
+    def block(z0, z1):
+        P = np.array([[x, y, z] for z in (z0, z1) for y in (0, 1) for x in (0, 1)], float)
+        q = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+        return P, [(a, b, c) for a, b, c, d in q] + [(a, c, d) for a, b, c, d in q]
+    (P1, T1), (P2, T2) = block(0, 1), block(1, 2)
+    pos, inv = np.unique(np.vstack([P1, P2]), axis=0, return_inverse=True)
+    tri = inv.ravel()[np.vstack([T1, np.array(T2) + 8])]
+    e = scene.feature_edges(pos, tri)
+    assert len(e) == 16                       # a 1 x 1 x 2 block: its upright edges in two pieces
+    assert not (np.abs(pos[e].mean(axis=1)[:, 2] - 1) < 1e-9).any()
+
+
 def test_layer_scenes(ipc_file):
     sess = Session()
     sc = scene.layer_scene(_job(ipc_file, "--export", "solder-bot:svg", session=sess, mode="export"), "solder-bot:svg")

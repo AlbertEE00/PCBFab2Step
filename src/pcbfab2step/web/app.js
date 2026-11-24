@@ -11,7 +11,11 @@ import { mountChrome } from "pcbfab2step/viewer-ui";
 
 const KEY = new URLSearchParams(location.search).get("t") || "";
 const CHEVRON = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4.5 2.5L8 6l-3.5 3.5"/></svg>';
-const FORMATS = ["dxf", "svg", "step"];
+const FORMATS = ["dxf", "svg", "step", "glb", "gltf", "obj", "fbx", "stl", "ply", "3mf"];
+const MODEL_FORMATS = ["step", "glb", "gltf", "obj", "fbx", "stl", "ply", "3mf"];
+const FORMAT_LABEL = { step: "STEP", glb: "GLB", gltf: "glTF", obj: "OBJ", fbx: "FBX", stl: "STL", ply: "PLY", "3mf": "3MF", dxf: "DXF", svg: "SVG" };
+const KIND_SWITCH = { mask: "mask", silk: "silk", finish: "finish", paste: "paste", components: "components" };
+const canonName = (x) => String(x).trim().toLowerCase().replace(/[\s_\-]+/g, "");
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -64,9 +68,58 @@ function request(extra = {}) {
 // ---------------------------------------------------------------------------
 // layout
 
+// panel widths: the handles between the panels resize them (kept in the GUI's preferences)
+const WIDTH = { side: 340, layers: 312 };
+const width = { ...WIDTH };
+function applyWidths() {
+  const max = Math.max(280, window.innerWidth * 0.45);
+  for (const k of Object.keys(width)) width[k] = Math.round(Math.min(max, Math.max(220, width[k])));
+  document.body.style.setProperty("--side-w", `${width.side}px`);
+  document.body.style.setProperty("--layers-w", `${width.layers}px`);
+}
+function saveWidths() { api("api/prefs", { panels: width }).catch(() => {}); }
+function splitter(cls, which, label) {
+  const el = h("div", { class: `split ${cls}`, role: "separator", "aria-orientation": "vertical", "aria-label": label, tabindex: "0",
+    title: "Drag to resize, double-click for the default width" });
+  el.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("drag");
+    document.body.classList.add("resizing");
+    const x0 = e.clientX, w0 = width[which];
+    const move = (ev) => { width[which] = which === "side" ? w0 + (ev.clientX - x0) : w0 - (ev.clientX - x0); applyWidths(); };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("drag");
+      document.body.classList.remove("resizing");
+      saveWidths();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  });
+  el.addEventListener("dblclick", () => { width[which] = WIDTH[which]; applyWidths(); saveWidths(); });
+  el.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 64 : 16, grow = which === "side" ? 1 : -1;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      width[which] += (e.key === "ArrowRight" ? step : -step) * grow;
+      applyWidths();
+      saveWidths();
+    }
+  });
+  return el;
+}
+window.addEventListener("resize", applyWidths);
+applyWidths();
+
 document.body.append(
   h("aside", { class: "side", "aria-label": "Inputs and options" }),
+  splitter("s1", "side", "Resize the inputs and options"),
   h("main", { class: "viewport", id: "viewer" }),
+  splitter("s2", "layers", "Resize the layers"),
   h("aside", { class: "layers", "aria-label": "Layers" }),
   h("footer", { class: "cmd" }),
 );
@@ -199,15 +252,30 @@ function addPathRow(add = false) {
   return h("div", { class: "addpath" }, inp);
 }
 
+function modelFormat() {
+  return S.values.format || (ST && ST.format) || "step";
+}
+
+function setModelFormat(f) {
+  if (f === "step") delete S.values.format; else S.values.format = f;
+  if (S.output) S.output = S.output.replace(/\.[A-Za-z0-9]+$/, "") + "." + f;
+  changed();
+}
+
 function renderOutput() {
-  const inp = h("input", { type: "text", value: S.output, placeholder: (ST && ST.output) || "PCBFab2Step/<board>.step in the folder", "aria-label": "Output file" });
+  const fmt = modelFormat();
+  const inp = h("input", { type: "text", value: S.output, placeholder: (ST && ST.output) || `PCBFab2Step/<board>.${fmt} in the folder`, "aria-label": "Output file" });
   inp.addEventListener("change", () => { S.output = inp.value.trim().replace(/^"|"$/g, ""); changed(); });
-  outputEl.replaceChildren(h("h2", {}, "STEP model"), h("div", { class: "out" }, inp,
+  const sel = h("select", { "aria-label": "Model format", title: "STEP, or the model as a mesh file (--format)", style: "width:auto" },
+    ...MODEL_FORMATS.map((f) => h("option", { value: f, selected: f === fmt }, FORMAT_LABEL[f])));
+  sel.addEventListener("change", () => setModelFormat(sel.value));
+  outputEl.replaceChildren(h("h2", {}, "Model file"), h("div", { class: "out" }, sel, inp,
     inApp ? h("button", { class: "btn", on: { click: async () => {
-      const got = await pick("save", S.output || (ST && ST.output) || "", ["STEP (*.step;*.stp)"]);
+      const f = modelFormat();
+      const got = await pick("save", S.output || (ST && ST.output) || "", [`${FORMAT_LABEL[f]} (*.${f})`]);
       if (got.length) { S.output = got[0]; inp.value = got[0]; changed(); }
     } } }, "Browse") : null));
-  outputEl.querySelector("input").title = "Where the STEP model goes (-o)";
+  inp.title = "Where the model goes (-o)";
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +382,12 @@ function buildGroups() {
         if (sw.id === "sanitize") {
           if (box.checked) setValue("sanitize", S.values.sanitize && S.values.sanitize !== "none" ? S.values.sanitize : "exposed");
           else setValue("sanitize", ST && ST.origins && ST.origins.sanitize && !String(ST.origins.sanitize).startsWith("--") ? "none" : null);
-        } else setValue(sw.id, box.checked);
+        } else {
+          const kill = new Set(sideNames(sw.id));
+          setHideList(hideList().filter((x) => !kill.has(canonName(x))));
+          setValue(sw.id, box.checked);
+          applyHidden();
+        }
       });
     }
     const el = h("div", { class: "group" }, head, body);
@@ -376,7 +449,67 @@ function setLayer(layer) {
   changed();
 }
 
-const ROW_COLOR = { copper: "copper", mask: "mask", silk: "silk", paste: "paste", dielectric: "dielectric", outline: "dielectric" };
+const ROW_COLOR = { copper: "copper", mask: "mask", silk: "silk", paste: "paste", dielectric: "dielectric", outline: "dielectric", finish: "finish" };
+
+// bodies left out of the model: the kind switches on the left and --hide names (one side, one layer)
+let hideAtRequest = new Set();
+function hideList() {
+  return String(S.values.hide_bodies || "").split(/[,\n]+/).map((x) => x.trim()).filter(Boolean);
+}
+function setHideList(list) {
+  const seen = new Set(), out = [];
+  for (const x of list) { const c = canonName(x); if (c && !seen.has(c)) { seen.add(c); out.push(x); } }
+  if (out.length) S.values.hide_bodies = out.join(","); else delete S.values.hide_bodies;
+}
+function hiddenNow() {          // what the command line hides now: ours, and what config.toml hides
+  const set = new Set(hideList().map(canonName));
+  for (const n of (ST && ST.hide_names) || []) if (!hideAtRequest.has(n)) set.add(n);
+  return set;
+}
+function switchOn(sw) {
+  return sw in S.values ? !!S.values[sw] : !!(ST && ST.switches && ST.switches[sw]);
+}
+function setSwitch(sw, on) {
+  const g = M.groups.find((x) => x.switch && x.switch.id === sw);
+  const fromConfig = ST && ST.origins && ST.origins[sw] && !String(ST.origins[sw]).startsWith("--");
+  if (g && on === g.switch.default && !fromConfig) delete S.values[sw]; else S.values[sw] = on;
+}
+function rowShown(r) {
+  const sw = KIND_SWITCH[r.kind];
+  if (sw && !switchOn(sw)) return false;
+  return !hiddenNow().has(canonName(r.hide));
+}
+function sideNames(sw) {
+  return stackRows.filter((r) => KIND_SWITCH[r.kind] === sw && r.hide).map((r) => canonName(r.hide));
+}
+function toggleRow(r, on) {
+  const sw = KIND_SWITCH[r.kind];
+  let list = hideList().filter((x) => canonName(x) !== canonName(r.hide));
+  const sib = sw ? stackRows.find((x) => x !== r && x.kind === r.kind && x.hide) : null;
+  if (on) {
+    if (sw && !switchOn(sw)) {              // the kind was off: on, with the other side still left out
+      setSwitch(sw, true);
+      if (sib) list.push(sib.hide);
+    }
+  } else if (sw && (!sib || !rowShown(sib))) {   // both sides off: the kind's switch
+    setSwitch(sw, false);
+    if (sib) list = list.filter((x) => canonName(x) !== canonName(sib.hide));
+  } else list.push(r.hide);
+  setHideList(list);
+  applyHidden();
+  syncOptions();
+  renderLayers();
+  changed();
+}
+function applyHidden() {
+  if (S.layer) return;
+  viewer.setHiddenNames([...hiddenNow()]);
+  const kinds = [];
+  if (!switchOn("paste")) kinds.push("paste");
+  if (!switchOn("components")) kinds.push("component");
+  viewer.setHiddenKinds(kinds);
+  chrome.refresh();
+}
 
 function renderLayers() {
   const xopts = buildExportOptions();
@@ -384,10 +517,16 @@ function renderLayers() {
   const live = (ST && ST.colors) || {};
   for (const r0 of stackRows) {
     const r = live[ROW_COLOR[r0.kind]] ? { ...r0, color: live[ROW_COLOR[r0.kind]] } : r0;
+    const shown = !r.hide || rowShown(r);
+    const box = r.hide ? h("input", { type: "checkbox", class: "inc", checked: shown, title: shown ? `In the model: click to leave ${r.hide} out (--hide ${r.hide})` : `Left out: click to put ${r.hide} back`, "aria-label": `${r.hide} in the model` }) : h("span");
+    if (r.hide) {
+      box.addEventListener("click", (e) => e.stopPropagation());
+      box.addEventListener("change", () => toggleRow(r0, box.checked));
+    }
     if (r.kind === "dielectric") {
       const t = r.t || 0;
       const px = Math.max(6, Math.min(30, Math.round(5 + 9 * Math.log10(Math.max(t * 1000, 5) / 5))));
-      list.append(h("li", { class: "diel", title: `${r.name} ${r.material || ""} ${thick(t)}` },
+      list.append(h("li", { class: `diel${shown ? "" : " out"}`, title: `${r.name} ${r.material || ""} ${thick(t)}` }, box,
         h("span", { class: "band", style: `background:${rgb(r.color)};height:${px}px` }),
         h("span", { class: "nm", style: `line-height:${Math.max(px - 2, 8)}px;height:${px}px;overflow:hidden` }, px >= 14 ? [h("b", {}, r.name), h("span", {}, r.material || "")] : null),
         h("span", { class: "th" }, px >= 14 ? thick(t) : "")));
@@ -396,29 +535,33 @@ function renderLayers() {
     const g = r.generic;
     const isSel = selected === g;
     const viewing = S.layer && S.layer.target === g;
+    const canExport = r.export !== false;
     const li = h("li", {
-      class: `layer${r.kind === "outline" ? " outline" : ""}${r.data ? "" : " nodata"}${viewing || isSel ? " sel" : ""}`,
+      class: `layer ${r.kind}${r.kind === "outline" ? " outline" : ""}${r.data ? "" : " nodata"}${viewing || isSel ? " sel" : ""}${shown ? "" : " out"}`,
       tabindex: "0", role: "button", "aria-expanded": String(isSel), title: r.data ? `${g} (${r.name})` : `${g}: no data in this layer`,
     },
+      box,
       h("span", { class: "band", style: `background:${rgb(r.color)}` }),
       h("span", { class: "nm" }, h("b", {}, g), r.name && r.name !== g ? h("span", {}, r.name) : null),
-      h("span", { class: "th" }, r.data ? thick(r.t) : "empty"));
-    const toggle = () => { selected = isSel ? null : g; renderLayers(); };
+      h("span", { class: "th" }, r.kind === "components" ? "" : r.data ? thick(r.t) : "empty"));
+    const toggle = () => { if (!canExport) return; selected = isSel ? null : g; renderLayers(); };
     li.addEventListener("click", (e) => { if (!e.target.closest(".acts")) toggle(); });
     li.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target === li) { e.preventDefault(); toggle(); } });
-    if (isSel) {
-      const fmt = fmtOf[g] || (S.layer && S.layer.target === g ? S.layer.fmt : r.kind === "stencil" ? "step" : "svg");
+    if (isSel && canExport) {
+      const fmts = r.formats || FORMATS;
+      const fmt = fmtOf[g] && fmts.includes(fmtOf[g]) ? fmtOf[g] : (S.layer && S.layer.target === g ? S.layer.fmt : r.kind === "stencil" || r.kind === "components" ? "step" : "svg");
       fmtOf[g] = fmt;
-      const seg = h("div", { class: "seg", role: "group", "aria-label": "Format" }, ...FORMATS.map((f) =>
-        h("button", { "aria-pressed": String(f === fmt), on: { click: () => { fmtOf[g] = f; if (S.layer && S.layer.target === g) setLayer({ target: g, fmt: f }); else renderLayers(); } } }, f.toUpperCase())));
+      const sel = h("select", { "aria-label": `Format of ${g}`, class: "fmt" }, ...fmts.map((f) => h("option", { value: f, selected: f === fmt }, FORMAT_LABEL[f] || f)));
+      sel.addEventListener("click", (e) => e.stopPropagation());
+      sel.addEventListener("change", () => { fmtOf[g] = sel.value; if (S.layer && S.layer.target === g) setLayer({ target: g, fmt: sel.value }); else renderLayers(); });
       const view = h("button", { class: "btn small", disabled: !r.data, on: { click: () => setLayer({ target: g, fmt }) } }, viewing ? "Viewing" : "View");
       const exp = h("button", { class: "btn small", disabled: !r.data, on: { click: () => runCommand(`${g}:${fmt}`) } }, "Export");
-      li.append(h("div", { class: "acts" }, seg, h("span", { class: "grow" }), view, exp));
+      li.append(h("div", { class: "acts" }, sel, h("span", { class: "grow" }), view, exp));
     }
     list.append(li);
   }
   layersEl.replaceChildren(
-    h("header", {}, h("h2", {}, "Layers"), h("p", {}, "Top to bottom. Pick one to view it or export it as it is on the board.")),
+    h("header", {}, h("h2", {}, "Layers"), h("p", {}, "Top to bottom. The box puts a layer in the model or leaves it out; pick a layer to view or export it on its own.")),
     xopts, list);
 }
 
@@ -463,7 +606,7 @@ runBtn.addEventListener("click", () => runCommand(S.layer ? `${S.layer.target}:$
 function renderCmd() {
   cmdCode.textContent = ST ? ST.command : "pcbfab2step";
   cmdErr.textContent = ST && ST.error && S.inputs.length ? ST.error : "";
-  runBtn.textContent = S.layer ? `Export ${S.layer.target}.${S.layer.fmt}` : "Export STEP";
+  runBtn.textContent = S.layer ? `Export ${S.layer.target}.${S.layer.fmt}` : `Export ${FORMAT_LABEL[modelFormat()] || "STEP"}`;
   runBtn.disabled = !ST || !!ST.error || running;
 }
 
@@ -493,8 +636,10 @@ async function runCommand(spec) {
       n = st.n;
       if (st.done) {
         setStatus(st.ok ? `Done in ${st.seconds} s` : "The command failed: see the log");
-        for (const p of st.outputs) doneEl.append(h("span", { class: "muted" }, "Wrote"), h("span", {}, p),
-          inApp ? h("button", { class: "btn small", on: { click: () => api("api/open", { path: p }) } }, "Show in folder") : null);
+        for (const p of st.outputs) {
+          doneEl.append(h("span", { class: "muted" }, "Wrote"), h("span", {}, p));
+          if (inApp) doneEl.append(h("button", { class: "btn small", on: { click: () => api("api/open", { path: p }) } }, "Show in folder"));
+        }
         break;
       }
     }
@@ -519,6 +664,7 @@ function changed() {
 async function refreshState() {
   const seq = ++stateSeq;
   let st;
+  const asked = new Set(hideList().map(canonName));
   try {
     st = await api("api/state", request());
   } catch (e) {
@@ -526,6 +672,7 @@ async function refreshState() {
   }
   if (seq !== stateSeq) return;
   ST = st;
+  hideAtRequest = asked;
   renderInputs();
   renderOutput();
   syncOptions();
@@ -544,6 +691,7 @@ async function refreshState() {
   if (!S.layer) {                       // instant: colours and what the settings leave out
     for (const [k, c] of Object.entries(st.colors || {})) viewer.setKindColor(k, c);
     viewer.setHiddenKinds(st.hidden || []);
+    viewer.setHiddenNames(st.hide_names || []);
     chrome.refresh();
   }
   if (stackRows.length) renderLayers();
@@ -574,6 +722,7 @@ async function requestScene() {
     if (!S.layer && ST) {
       for (const [k, c] of Object.entries(ST.colors || {})) viewer.setKindColor(k, c);
       viewer.setHiddenKinds(ST.hidden || []);
+      viewer.setHiddenNames([...hiddenNow()]);
     }
     chrome.refresh();
     showEmpty(null);
@@ -616,6 +765,9 @@ window.pcbApp = {
 
 (async function start() {
   const init = await api("api/init");
+  const panels = (init.prefs && init.prefs.panels) || {};
+  for (const k of Object.keys(WIDTH)) if (typeof panels[k] === "number") width[k] = panels[k];
+  applyWidths();
   M = init.model;
   inApp = init.window;
   windows = init.windows;

@@ -31,7 +31,7 @@ from .board import (CAP_TOKENS, COATINGS, FILL_TOKENS, PLUG_TOKENS, TENT_TOKENS,
 from .brep import OCC, Brep, bbox, cut_shapes
 from .common import DEFAULTS, EPS_Z, VALID_RANGE, PointIndex, info, name_tokens, warn
 from .config import finish_color_for, parse_color
-from .geometry import EMPTY, circle, clean, gdiff, ginter, iter_polys, union_all
+from .geometry import EMPTY, circle, clean, gdiff, ginter, iter_polys, simplify, union_all
 
 
 MAX_MARKER = 6.0   # mm: larger features on via-protection document layers are not hole markers
@@ -291,6 +291,22 @@ def _family(h: CounterholeHint) -> str:
 # --------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------
+
+
+class Simplified:
+    """A geometry backend that simplifies every region first (geometry.simplify)."""
+
+    def __init__(self, geo, tol: float):
+        self.geo, self.tol = geo, tol
+
+    def prisms(self, geom, z0, z1):
+        return self.geo.prisms(simplify(geom, self.tol), z0, z1)
+
+    def sheets(self, geom, z, sg=1.0):
+        return self.geo.sheets(simplify(geom, self.tol), z, sg)
+
+    def disc_prism(self, *a):
+        return self.geo.disc_prism(*a)
 
 
 class Model:
@@ -1293,9 +1309,10 @@ class Model:
                 left_open.append(h)
         return union_all(out), left_open, len(out), "via openings by shape: round, around one via, no paste"
 
-    def _comp(self, name, color, solids, layer=None, kind=""):
+    def _comp(self, name, color, solids, layer=None, kind="", side=""):
         if solids:
-            self.components.append(dict(name=name, color=color, solids=solids, layer=layer or name, kind=kind))
+            self.components.append(dict(name=name, color=color, solids=solids, layer=layer or name, kind=kind,
+                                        side=side))
 
     def build(self):
         exact = self.geo is Brep
@@ -1304,6 +1321,8 @@ class Model:
         elif self.cones:
             self._cone_steps()
         o = self.opts
+        if getattr(o, "simplify", 0.0) > 0 and not isinstance(self.geo, Simplified):
+            self.geo = Simplified(self.geo, o.simplify)
         st = self.stk.stack
         n = len(st)
         cache: Dict[tuple, object] = {}
@@ -1340,7 +1359,8 @@ class Model:
                 solids = solids + diel_extra[i]
             if L.kind == "copper":
                 name = f"{L.name} (copper {L.t * 1000:.1f} um)"
-                self._comp(name, o.copper_color, solids, L.name, "copper")
+                side = "top" if L is self.stk.top_cu else "bottom" if L is self.stk.bot_cu else ""
+                self._comp(name, o.copper_color, solids, L.name, "copper", side)
             else:
                 bits = [b for b in (L.material, L.dielectric_type.lower() if L.dielectric_type else "") if b]
                 bits.append(f"{L.t:.4f} mm")
@@ -1419,7 +1439,7 @@ class Model:
             solids += self.geo.prisms(upper, *zr(z_cu, z_cu + sg * t_m))
             L0 = masks[0]
             nm = f"{L0.name} (solder mask {t_m * 1000:.1f} um" + (f", Dk {L0.dk:g}" if L0.dk else "") + ")"
-            self._comp(nm, o.mask_color, solids, L0.name, "mask")
+            self._comp(nm, o.mask_color, solids, L0.name, "mask", side)
             z_mask_top = z_cu + sg * t_m
         else:
             z_mask_top = None
@@ -1445,7 +1465,7 @@ class Model:
             self.svg[f"finish_{side}"] = F
             solids = self.geo.prisms(F, *zr(z_cu, z_cu + sg * t_f))
             nm = f"{fin_name} (surface finish{', ' + fin_mat if fin_mat else ''}, {t_f * 1000:.2f} um)"
-            self._comp(nm, self._finish_color(fin_mat), solids, fin_name, "finish")
+            self._comp(nm, self._finish_color(fin_mat), solids, fin_name, "finish", side)
         # silkscreen
         silks = coats.get("silk", []) if not o.no_silk else []
         if silks:
@@ -1453,21 +1473,28 @@ class Model:
             t_s = max(L.t for L in silks)
             S = gdiff(S, pierce)
             solids = []
+            surface = getattr(o, "silk_body", "solid") == "surface"
             if M is not None:
                 if not o.no_clip_silk:
                     S = ginter(S, M)
-                S = clean(S)
-                solids = self.geo.prisms(S, *zr(z_mask_top, z_mask_top + sg * t_s))
+                S = simplify(clean(S), getattr(o, "silk_simplify", 0.0))
+                if surface:
+                    solids = self.geo.sheets(S, z_mask_top + sg * t_s, sg)
+                else:
+                    solids = self.geo.prisms(S, *zr(z_mask_top, z_mask_top + sg * t_s))
             else:
-                S = clean(gdiff(S, holes))
+                S = simplify(clean(gdiff(S, holes)), getattr(o, "silk_simplify", 0.0))
                 lower = clean(gdiff(S, C))
                 upper = clean(gdiff(S, F)) if t_f > 0 else S
-                if cu is not None:
-                    solids += self.geo.prisms(lower, *zr(z_lam, z_cu))
-                solids += self.geo.prisms(upper, *zr(z_cu, z_cu + sg * t_s))
+                if surface:
+                    solids += self.geo.sheets(S, z_cu + sg * t_s, sg)
+                else:
+                    if cu is not None:
+                        solids += self.geo.prisms(lower, *zr(z_lam, z_cu))
+                    solids += self.geo.prisms(upper, *zr(z_cu, z_cu + sg * t_s))
             self.svg[f"silk_{side}"] = S
             self._comp(f"{silks[0].name} (silkscreen {t_s * 1000:.1f} um)", o.silk_color, solids, silks[0].name,
-                       "silk")
+                       "silk", side)
         # solder paste
         pastes = coats.get("paste", []) if o.paste else []
         if pastes:
@@ -1476,7 +1503,7 @@ class Model:
             z0 = z_cu + sg * t_f
             solids = self.geo.prisms(P, *zr(z0, z0 + sg * t_p))
             self._comp(f"{pastes[0].name} (solder paste {t_p * 1000:.0f} um)", o.paste_color, solids, pastes[0].name,
-                       "paste")
+                       "paste", side)
 
     def _build_hole_bodies(self):
         o = self.opts

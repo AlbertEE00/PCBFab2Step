@@ -269,6 +269,17 @@ class MeshGeo:
         return [Prism(p, z0, z1) for p in iter_polys(geom) if p.area >= 1e-12]
 
     @staticmethod
+    def sheets(geom, z: float, sg: float = 1.0) -> List[Mesh]:
+        if geom is None or geom.is_empty:
+            return []
+        m = flat_mesh(geom, z)
+        if m is None:
+            return []
+        if sg < 0:
+            m = Mesh(m.pos, m.tri[:, ::-1].copy(), m.edges)
+        return [m]
+
+    @staticmethod
     def disc_prism(x, y, r_out, r_in, z0, z1):
         return disc_mesh(x, y, r_out, r_in, z0, z1)
 
@@ -322,7 +333,9 @@ def feature_edges(pos: np.ndarray, tri: np.ndarray, angle: float = FEATURE_ANGLE
         return np.zeros((0, 2), np.int64)
     a, b, c = pos[tri[:, 0]], pos[tri[:, 1]], pos[tri[:, 2]]
     nrm = np.cross(b - a, c - a)
-    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-30)
+    ln = np.linalg.norm(nrm, axis=1, keepdims=True)
+    flat = ln[:, 0] <= 1e-12                 # a zero-area triangle has no direction: never makes an edge
+    nrm /= np.maximum(ln, 1e-30)
     e = np.sort(np.vstack([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]]), axis=1)
     f = np.tile(np.arange(len(tri)), 3)
     ek = e[:, 0] * (len(pos) + 1) + e[:, 1]
@@ -330,9 +343,31 @@ def feature_edges(pos: np.ndarray, tri: np.ndarray, angle: float = FEATURE_ANGLE
     ek, e, f = ek[o], e[o], f[o]
     first = np.nonzero(np.r_[True, ek[1:] != ek[:-1]])[0]
     cnt = np.diff(np.r_[first, len(ek)])
-    sharp = cnt != 2
+    sharp = cnt == 1
     two = np.nonzero(cnt == 2)[0]
-    sharp[two] = (nrm[f[first[two]]] * nrm[f[first[two] + 1]]).sum(axis=1) < math.cos(angle)
+    fa, fb = f[first[two]], f[first[two] + 1]
+    sharp[two] = ((nrm[fa] * nrm[fb]).sum(axis=1) < math.cos(angle)) & ~flat[fa] & ~flat[fb]
+    # an edge of more than two triangles: bodies touching (a solder mask's lower
+    # and upper part, face to face). Two faces on the same side of the edge with
+    # opposite normals are where the bodies meet: inside the material, so they
+    # drop out, and what is left decides as above.
+    for k in np.unique(cnt[cnt > 2]):
+        g = np.nonzero(cnt == k)[0]
+        at = first[g][:, None] + np.arange(k)
+        F, U, V = f[at], e[at, 0], e[at, 1]
+        W = tri[F].sum(axis=2) - U - V                  # the corner off the edge
+        N = nrm[F]
+        t = pos[V] - pos[U]
+        t /= np.maximum(np.linalg.norm(t, axis=2, keepdims=True), 1e-30)
+        D = pos[W] - pos[U]
+        D -= (D * t).sum(axis=2, keepdims=True) * t     # into the face, square to the edge
+        nn = np.einsum("gid,gjd->gij", N, N)
+        dd = np.einsum("gid,gjd->gij", D, D)
+        inside = ((nn < -0.999) & (dd > 0)).any(axis=2) | flat[F]
+        live = ~inside
+        nl = live.sum(axis=1)
+        nn = np.where(live[:, :, None] & live[:, None, :], nn, 1.0)
+        sharp[g] = (nl == 1) | ((nl >= 2) & (nn.min(axis=(1, 2)) < math.cos(angle)))
     return e[first[sharp]]
 
 
@@ -385,6 +420,8 @@ class Part:
     path: Tuple[str, ...] = ()      # the STEP assembly it sits in
     layer: str = ""
     opacity: float = 1.0
+    side: str = ""
+    names: Tuple[str, ...] = ()     # what --hide knows it by (pipeline.body_names)
 
 
 @dataclass
@@ -396,6 +433,7 @@ class Scene:
     flat: bool = False              # a 2D layer view
     info: List[str] = field(default_factory=list)
     hidden: List[str] = field(default_factory=list)     # kinds the settings hide (shown on request)
+    hide_names: List[str] = field(default_factory=list)  # bodies --hide leaves out (by name, shown on request)
     model: object = None                                  # the Model it was made from (not packed)
 
     def bounds(self):
@@ -414,8 +452,8 @@ class Scene:
             pos = np.ascontiguousarray(m.pos, dtype="<f4")
             tri = np.ascontiguousarray(m.tri, dtype="<u4")
             edg = np.ascontiguousarray(m.edges, dtype="<u4")
-            rec = dict(id=i, name=p.name, kind=p.kind, path=list(p.path), layer=p.layer,
-                       color=[round(float(c), 4) for c in p.color], opacity=p.opacity)
+            rec = dict(id=i, name=p.name, kind=p.kind, path=list(p.path), layer=p.layer, side=p.side,
+                       names=list(p.names), color=[round(float(c), 4) for c in p.color], opacity=p.opacity)
             for key, arr in (("pos", pos), ("tri", tri), ("edges", edg)):
                 rec[key] = [off, int(arr.size)]
                 chunks.append(arr.tobytes())
@@ -423,13 +461,16 @@ class Scene:
             parts.append(rec)
         manifest = dict(version=SCENE_VERSION, title=self.title, mode=self.mode, view=self.view, flat=self.flat,
                         units="mm", bounds=self.bounds(), parts=parts, info=self.info, hidden=self.hidden,
+                        hide_names=list(self.hide_names),
                         triangles=int(sum(len(p.mesh.tri) for p in self.parts)))
         return manifest, b"".join(chunks)
 
 
-def _parts_from_components(comps) -> List[Part]:
+def _parts_from_components(comps, model=None) -> List[Part]:
     """Viewer parts of the model's components: MeshGeo solids are joined,
     B-rep solids tessellated."""
+    from .pipeline import body_names, copper_index
+    idx = copper_index(model) if model is not None else None
     out = []
     lazy = [c for c in comps if c["solids"] and isinstance(c["solids"][0], (Mesh, Prism))]
     brep = [c for c in comps if not any(c is x for x in lazy)]
@@ -440,7 +481,11 @@ def _parts_from_components(comps) -> List[Part]:
         if not len(mesh.tri):
             continue
         kind = c.get("kind") or ("component" if c.get("path") and c["path"][0].startswith("Components") else "")
-        out.append(Part(c["name"], kind, tuple(c["color"]), mesh, tuple(c.get("path") or ()), c.get("layer", "")))
+        path = tuple(c.get("path") or ())
+        side = c.get("side") or ("top" if path and path[0] == "Components top" else
+                                 "bottom" if path and path[0].startswith("Components") else "")
+        out.append(Part(c["name"], kind, tuple(c["color"]), mesh, path, c.get("layer", ""), side=side,
+                        names=tuple(body_names(c, idx))))
     return out
 
 
@@ -469,9 +514,11 @@ def model_scene(job, exact: bool = False) -> Scene:
         for c in comps:
             c["path"] = ("PCB",)
         comps = comps + job_components(job, m)
-    parts = _parts_from_components(comps)
+    parts = _parts_from_components(comps, m)
     sc = Scene(job.read().name + (" (exact)" if exact else ""), "exact" if exact else "fast", parts)
     sc.hidden = hidden
+    from .pipeline import hide_set
+    sc.hide_names = sorted(hide_set(o))
     sc.model = m
     return sc
 
@@ -498,6 +545,15 @@ def layer_scene(job, spec: str) -> Scene:
     (with the outline unless --no-outline), STEP in 3D (with the PCB body if
     --outline)."""
     from . import exports
+    from .pipeline import components_side
+    name, formats = exports.parse_export(spec, None)
+    side = components_side(name)
+    if side:                                   # the ECAD parts of one side, as placed in the model
+        parts = _parts_from_components(job.component_parts(side, exact=False))
+        label = f"components-{'top' if side == 'top' else 'bot'}"
+        sc = Scene(f"{label}.{formats[0]}", "layer", parts)
+        sc.info.append(f"{len(parts)} bodies")
+        return sc
     m = job.prepare()
     t, geom, label, formats = exports.layer_geometry(m, spec, job.opts, job.args.output)
     fmt = formats[0]

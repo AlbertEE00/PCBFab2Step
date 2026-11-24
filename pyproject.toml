@@ -1,6 +1,6 @@
 [project]
 name = "pcbfab2step"
-version = "2.2.0"
+version = "2.3.0"
 description = "Convert PCB fab data (ODB++, IPC-2581, NC drill) to coloured STEP models: full stackup, copper, mask, silkscreen, finish, holes, counterholes, back drills and via protection"
 readme = "README.md"
 license = "AGPL-3.0-only"

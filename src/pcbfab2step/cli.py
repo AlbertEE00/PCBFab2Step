@@ -73,7 +73,7 @@ inputs:
   other sources add what it lacks (IPC-2581: counterhole types; NC drill: counterhole depths;
   ODB++ next to IPC-2581: via types). Gerber is found but not read yet.
 
-export targets (--export TARGET:FORMAT, FORMAT dxf, svg or step; several: dxf,svg):
+export targets (--export TARGET:FORMAT, FORMAT dxf, svg, step or a mesh format; several: dxf,svg):
   A layer is exported as it is on the board (as in the model), not as the artwork.
   outline                      DXF/SVG: the board outline; STEP: the plain PCB body
   paste-top   paste-bot        solder paste deposits
@@ -82,6 +82,8 @@ export targets (--export TARGET:FORMAT, FORMAT dxf, svg or step; several: dxf,sv
   solder-top  solder-bot       the solder mask: outline minus its openings, tented vias closed
   silk-top    silk-bot         silkscreen, clipped to the solder mask
   copper-top  copper-bot  copper-N   copper layer (holes cut), N counted from the top
+  components-top components-bot   the ECAD STEP's parts of one side, placed as in the model
+                               (STEP or a mesh format)
   or a layer's name in the fab data ('pcbfab2step info' lists them). Without -top/-bot the
   side with data is taken. --invert: the rest of the outline instead (mask openings, the paste
   of a stencil, the clearances in the copper). DXF and SVG include the outline (--no-outline
@@ -147,12 +149,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hide design detail: outer (inner layers merged into one core, vias not drilled), "
                         "exposed (also outer copper cut to pads and what the solder mask leaves open; the "
                         "default), pads (outer copper: pads only)")
+    m.add_argument("--format", choices=["step", "glb", "gltf", "obj", "fbx", "stl", "ply", "3mf"], default=None,
+                   help="the model as STEP (default) or as a mesh: glb, gltf, obj (+ mtl), fbx, stl, ply, 3mf; "
+                        "an -o file name with one of these extensions does the same")
     m.add_argument("--vias", action="append", default=[], metavar="RULE",
                    help="via protection over the fab data, or undrilled / drilled (repeatable; see below)")
     m.add_argument("--show", action="append", default=[], metavar="LIST",
-                   help="build these too: paste (off by default), or mask, silk, finish, components")
+                   help="build these too: paste (off by default), or mask, silk, finish, components; or one body "
+                        "a config.toml hides (silk-bot, ...)")
     m.add_argument("--hide", action="append", default=[], metavar="LIST",
-                   help="leave out: mask, silk, finish, paste, components")
+                   help="leave out: mask, silk, finish, paste, components (both sides), or single bodies: "
+                        "silk-bot, solder-top, finish-top, paste-bot, copper-2, components-bot, a designator "
+                        "(U1) or a layer name")
     m.add_argument("--counterhole", action="append", default=[], metavar="SPEC",
                    help="both sides: type=bore|sink angle=DEG depth=SIZE (see below)")
     m.add_argument("--counterhole-top", action="append", default=[], metavar="SPEC", help="top side")
@@ -259,7 +267,7 @@ def settings_from_args(args) -> SimpleNamespace:
     c = SimpleNamespace(layer_thickness=[], via_protection=[], counterhole=list(args.counterhole),
                         counterhole_top=list(args.counterhole_top),
                         counterhole_bottom=list(args.counterhole_bottom), counterbore_rules=[],
-                        countersink_rules=[], vias_drilled=None, _labels={})
+                        countersink_rules=[], vias_drilled=None, hide_bodies=[], show_bodies=[], _labels={})
     lab = c._labels
     by_key = {f"{sec}.{key}": (attr, kind) for sec, key, attr, kind, *_ in SCHEMA}
     for item in args.set:
@@ -313,13 +321,18 @@ def settings_from_args(args) -> SimpleNamespace:
     for flag, vals, on in (("--show", args.show, True), ("--hide", args.hide, False)):
         for item in _items(vals):
             attr = SHOW_KEYS.get(_key(item))
-            if not attr:
-                raise SystemExit(f"{flag} {item}: no such item (mask, silk, finish, paste, components)")
+            if not attr:                                  # one body: silk-bot, copper-3, U1, a layer name
+                (c.show_bodies if on else c.hide_bodies).append(item)
+                lab["hide_bodies"] = flag
+                continue
             if attr in shown and shown[attr] != on:
                 raise SystemExit(f"{item} is both shown and hidden")
             shown[attr] = on
             setattr(c, attr, on)
             lab[attr] = f"{flag} {item}"
+    both = {_key(x) for x in c.hide_bodies} & {_key(x) for x in c.show_bodies}
+    if both:
+        raise SystemExit(f"{', '.join(sorted(both))}: both shown and hidden")
     for item in args.vias:
         t = item.strip().lower()
         if t in ("undrilled", "nodrill", "no-drill", "off"):
@@ -345,7 +358,7 @@ def settings_from_args(args) -> SimpleNamespace:
 
 def _check_scope(args):
     """One call, one output: flags of the other output are mistakes."""
-    model_only = [f for f, v in (("--show", args.show), ("--hide", args.hide)) if v]
+    model_only = [f for f, v in (("--show", args.show), ("--hide", args.hide), ("--format", args.format)) if v]
     if args.export and model_only:
         raise SystemExit(f"{', '.join(model_only)}: acts on the board model, not on --export")
     export_only = [f for f, v in (("--outline/--no-outline", args.outline is not None),
@@ -386,6 +399,12 @@ def run(args, mode: str) -> int:
         info(f"Done in {time.time() - job.t0:.1f} s")
         return 0
 
+    if job.model_format() != "step":
+        model.report()
+        for p in job.write_mesh():
+            info(f"Wrote {p}")
+        info(f"Done in {time.time() - job.t0:.1f} s")
+        return 0
     model.report()
     info("\nBuilding solids ...")
     out = job.write_model()

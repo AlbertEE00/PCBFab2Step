@@ -71,6 +71,10 @@ pcbfab2step FAB --export outline:step                 the plain PCB body
 pcbfab2step board.cvg parts.step                      IPC-2581 board with the parts of a STEP
 pcbfab2step FAB --sources ipc+drill+step              IPC-2581 as the board, the ODB++ not read
 pcbfab2step FAB --sanitize --view                     look at the model first, write nothing
+pcbfab2step FAB --format glb                          the model as a mesh (or -o board.glb): glb, gltf, obj,
+                                                      fbx, stl, ply, 3mf
+pcbfab2step FAB --hide silk-bot,copper-3              single layers left out of the model
+pcbfab2step FAB --export components-bot:step          the ECAD STEP's bottom parts, placed as in the model
 pcbfab2step gui FAB --show paste                      the window, starting with these options
 ```
 
@@ -187,6 +191,18 @@ given as an input is used whatever its name.
   on the bottom, parts through it by the top. A different board thickness in
   the ECAD export therefore never leaves parts floating or sunk in; the
   report gives both thicknesses.
+
+### Leaving bodies out
+
+`--hide` takes the kinds of body (`mask`, `silk`, `finish`, `paste`,
+`components`: both sides, and their space in the stackup) and single bodies:
+one side (`silk-bot`, `solder-top` or `mask-top`, `finish-bot`, `paste-top`,
+`components-bot`), a copper layer (`copper-top`, `copper-2`, `copper-bot`), a
+hole body (`plating`, `fill`, `plug`, `cap`), a designator of the ECAD STEP
+(`U7`) or a layer's name in the fab data. Single bodies are only left out of
+the file: the rest of the model stays where it is. `--show NAME` takes back a
+body that config.toml (`[model] hide = [...]`) leaves out. A name that
+matches no body is reported.
 
 ### Hiding design detail
 
@@ -362,6 +378,49 @@ DXF is R12 with closed polylines in mm (layer `OUTLINE` and a layer named
 after the target); arcs are polylines at the tessellation tolerance. SVG is
 in mm, the layer filled and the outline as a line.
 
+## Mesh files
+
+The model, a layer or the components of one side can also be written as a
+mesh, for renderers, game engines, web viewers and 3D printing:
+
+```
+pcbfab2step FAB --format glb                      FAB/PCBFab2Step/<board>.glb
+pcbfab2step FAB -o board.fbx --sanitize           the extension chooses the format
+pcbfab2step FAB --export copper-top:obj           one layer (its bodies as in the layer STEP)
+pcbfab2step FAB --export components-top:glb       the top parts
+```
+
+| format | file | units, up | per body |
+|---|---|---|---|
+| `glb`, `gltf` | glTF 2.0 (`.gltf` + `.bin`) | metres, +Y | mesh, PBR material (copper metallic), assembly tree |
+| `obj` | OBJ + `.mtl` | mm, +Y | object, material (Kd, and Pm/Pr for PBR) |
+| `fbx` | FBX 7.4 binary | mm (declared), +Z declared | model, Phong material, assembly tree |
+| `stl` | binary STL | mm, +Z | all bodies in one, no colour |
+| `ply` | binary PLY | mm, +Z | vertex colours |
+| `3mf` | 3MF | mm, +Z | object, display colour |
+
+The meshes are the viewer's preview meshes (straight from the 2D regions, as
+quick as the preview); `--set output.mesh=exact` tessellates the STEP's own
+solids instead (true cones in countersinks). Bodies hidden with `--hide` stay
+out of the mesh files as they do out of the STEP.
+
+## STEP size
+
+A STEP solid stores every straight edge of an outline as a face of its own
+with its edges, points and plane, about 1.5 kB each. Most of a large file is
+outlines drawn with many short edges: silkscreen text and logos (points a few
+um apart), copper pours with thousands of via clearances, the solder mask
+around every pad. On a dense 6-layer board the silkscreen alone was 150 of
+341 MB. What helps, largest first:
+
+| setting | what it does | on that board |
+|---|---|---|
+| `--sanitize` | inner layers merged into one core | 236 to 108 MB |
+| `--hide silk,...` | leaves bodies out | |
+| `silkscreen.simplify` (default 0.002 mm) | drops silkscreen points closer than 2 um to the line through their neighbours | silkscreen 150 to 30 MB |
+| `--set silkscreen.body=surface` | silkscreen as its top face only | silkscreen 4x smaller again |
+| `--set geometry.simplify=0.002` | the same for every layer; outlines move by up to 2 um | 108 to 91 MB (sanitized) |
+
 ## Viewer and GUI
 
 `--view` shows what the command would write and writes nothing: the board
@@ -376,22 +435,38 @@ pcbfab2step FAB --export solder-bot:svg --invert --view
 
 The preview is meshed straight from the 2D region every solid of the STEP is
 made of (countersinks as stepped discs); `exact` builds the B-rep solids and
-shows those. The viewer rotates (left drag), pans (right drag), zooms to the
-cursor (wheel) and orbits around a double-clicked point; it has preset
-views, a section plane with the cut faces filled, the edges, a see-through
-solder mask and a list of the bodies with their visibility. These change the
-view only.
+shows those. In the viewer:
+
+| | |
+|---|---|
+| left drag | rotate freely (no stop at the top or bottom: the board turns over) |
+| right or middle drag, shift + left drag | pan |
+| wheel | zoom to the cursor |
+| horizontal wheel (tilt wheel, touchpad, shift + wheel) | pan sideways |
+| double-click | rotate around that point from now on |
+| F, E, Home | fit, edges, iso view |
+
+The tool bar has the iso views from the four corners above and below, top,
+bottom (mirrored as when the board is flipped), front, side and fit; a
+section plane across X, Y or Z with its position, a turn about the board's
+normal and a tilt for oblique cuts, the cut faces filled; the edges; a
+see-through solder mask; and the list of bodies with their visibility. These
+change the view only.
 
 `pcbfab2step gui [INPUT ...] [options]` puts the command line in a window.
 On the left the inputs (drop a fab folder or file on the window, or choose
 one; missing NC drill output or the ECAD's STEP can be dropped on their own
-slot), the STEP file to write and the options in groups (solder mask,
-silkscreen, finish, paste, components, vias, counterholes, ...), each a flag
-of the command line. In the middle the 3D view, on the right the board's
-layers from top to bottom: pick one to view it or export it as DXF, SVG or
-STEP, with the export settings (invert, outline, aperture offset, stencil
-thickness) above them. Along the bottom is the command line of all of this,
-updated as the options change: the Export button runs it, Copy copies it.
+slot), the model file to write (STEP or a mesh format) and the options in
+groups (solder mask, silkscreen, finish, paste, components, vias,
+counterholes, ...), each a flag of the command line. In the middle the 3D
+view, on the right the board from top to bottom: the components of each
+side, then every layer. A layer's box puts it in the model or leaves it out
+(`--hide`; with both sides of a kind out, its switch on the left goes off,
+and the other way round). Pick a layer to view it on its own or export it as
+DXF, SVG, STEP or a mesh, with the export settings (invert, outline, aperture
+offset, stencil thickness) above. Along the bottom is the command line of all
+of this, updated as the options change: the Export button runs it, Copy
+copies it. Drag the borders of the side panels to resize them.
 
 The GUI has no settings of its own: anything it does is that command line,
 and `pcbfab2step gui FAB --show paste` opens with paste on. The fab data is
@@ -446,6 +521,7 @@ src/pcbfab2step/
   view.py          --view, and the small web server of the viewer and the GUI
   gui.py           the GUI's back end
   options.py       the GUI's options as command line flags
+  meshfile.py      glTF, OBJ, FBX, STL, PLY and 3MF writers
   web/             viewer.js (three.js), the viewer's tool bar, the GUI page;
                    vendor/three.bundle.min.js is three.js (MIT, see tools/build_web.md)
 tests/
@@ -456,6 +532,21 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 2.3.0: mesh files: `--format glb|gltf|obj|fbx|stl|ply|3mf` (or the `-o`
+  extension) for the model, mesh formats for `--export`; `components-top` and
+  `components-bot` export targets. `--hide` and `--show` take single bodies
+  (one side, one copper layer, a designator, a layer name). Smaller STEP
+  files: the silkscreen outline is simplified by 2 um by default
+  (`silkscreen.simplify`), `silkscreen.body=surface`, `geometry.simplify`.
+  Fix: a solder mask (or copper) region whose outline ran out and straight
+  back along itself, or had points nanometres apart, was left out of the STEP
+  and the exact view without a word; such rings are cleaned now, and a region
+  that still fails is reported. Viewer: free rotation, horizontal wheel pans,
+  iso views from eight corners, a section plane that turns and tilts, darker
+  non-metals (a black mask reads black); the exact view no longer draws the
+  triangles where two bodies of a layer meet face to face (lines across the
+  solder mask). GUI: resizable side panels, a box per layer, the model format,
+  the components of each side.
 - 2.2.0: `--view [exact]` shows the model or the exported layer and writes
   nothing; `pcbfab2step gui` is the command line in a window with a 3D view
   (pywebview, `pip install .[gui]`). The runs are split into stages

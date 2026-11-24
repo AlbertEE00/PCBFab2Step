@@ -5,7 +5,7 @@
 // Used by `pcbfab2step --view` (a page of its own) and by the GUI.
 
 import * as THREE from "three";
-import { OrbitControls, RoomEnvironment } from "three";
+import { RoomEnvironment } from "three";
 
 // How each kind of body looks; the colour comes from the scene (the STEP colour).
 const LOOK = {
@@ -14,7 +14,7 @@ const LOOK = {
   cap: { metal: 0.85, rough: 0.34 },
   finish: { metal: 0.95, rough: 0.22 },
   paste: { metal: 0.6, rough: 0.5 },
-  mask: { metal: 0.0, rough: 0.36 },
+  mask: { metal: 0.0, rough: 0.48 },
   silk: { metal: 0.0, rough: 0.75 },
   dielectric: { metal: 0.0, rough: 0.85 },
   core: { metal: 0.0, rough: 0.85 },
@@ -25,15 +25,165 @@ const LOOK = {
 };
 const UNLIT = new Set(["layer"]);
 
-const VIEWS = {
-  iso: [1, -1.15, 0.95],
-  top: [0, -1e-4, 1],
-  bottom: [0, 1e-4, -1],
-  front: [0, -1, 1e-4],
-  back: [0, 1, 1e-4],
-  left: [-1, 0, 1e-4],
-  right: [1, 0, 1e-4],
+// [direction from the target to the camera, the camera's up]
+const UP_Z = [0, 0, 1], UP_Y = [0, 1, 0];
+export const VIEWS = {
+  iso: [[1, -1.15, 0.95], UP_Z],
+  "iso-front-left": [[-1, -1.15, 0.95], UP_Z],
+  "iso-back-right": [[1, 1.15, 0.95], UP_Z],
+  "iso-back-left": [[-1, 1.15, 0.95], UP_Z],
+  "iso-below-front-right": [[1, -1.15, -0.95], UP_Z],
+  "iso-below-front-left": [[-1, -1.15, -0.95], UP_Z],
+  "iso-below-back-right": [[1, 1.15, -0.95], UP_Z],
+  "iso-below-back-left": [[-1, 1.15, -0.95], UP_Z],
+  top: [[0, 0, 1], UP_Y],
+  bottom: [[0, 0, -1], UP_Y],          // seen from below: mirrored left to right, as when the board is flipped
+  front: [[0, -1, 0], UP_Z],
+  back: [[0, 1, 0], UP_Z],
+  left: [[-1, 0, 0], UP_Z],
+  right: [[1, 0, 0], UP_Z],
 };
+
+/** Free rotation about the screen's axes (no pole: the board turns over in
+ * any direction), pan, zoom to the cursor. Left drag rotates, right or
+ * middle drag (or shift + left) pans, the wheel zooms, a horizontal wheel
+ * (tilt wheel, touchpad, shift + wheel) pans sideways; touch: one finger
+ * rotates, two pinch and pan. */
+class FreeControls extends THREE.EventDispatcher {
+  constructor(camera, dom) {
+    super();
+    this.camera = camera;
+    this.dom = dom;
+    this.target = new THREE.Vector3();
+    this.enableRotate = true;
+    this.minDistance = 1e-4;
+    this.maxDistance = 1e7;
+    this.rotateSpeed = 0.0058;            // radians per pixel
+    this._ptrs = new Map();
+    this._mode = null;
+    this._down = (e) => this.onDown(e);
+    this._move = (e) => this.onMove(e);
+    this._up = (e) => this.onUp(e);
+    this._wheel = (e) => this.onWheel(e);
+    this._menu = (e) => e.preventDefault();
+    dom.addEventListener("pointerdown", this._down);
+    dom.addEventListener("pointermove", this._move);
+    dom.addEventListener("pointerup", this._up);
+    dom.addEventListener("pointercancel", this._up);
+    dom.addEventListener("wheel", this._wheel, { passive: false });
+    dom.addEventListener("contextmenu", this._menu);
+  }
+
+  update() {
+    this.dispatchEvent({ type: "change" });
+  }
+
+  dispose() {
+    const d = this.dom;
+    d.removeEventListener("pointerdown", this._down);
+    d.removeEventListener("pointermove", this._move);
+    d.removeEventListener("pointerup", this._up);
+    d.removeEventListener("pointercancel", this._up);
+    d.removeEventListener("wheel", this._wheel);
+    d.removeEventListener("contextmenu", this._menu);
+  }
+
+  _axes() {
+    const q = this.camera.quaternion;
+    return [new THREE.Vector3(1, 0, 0).applyQuaternion(q), new THREE.Vector3(0, 1, 0).applyQuaternion(q),
+      new THREE.Vector3(0, 0, -1).applyQuaternion(q)];
+  }
+
+  rotate(dx, dy) {
+    if (!this.enableRotate) return this.pan(dx, dy);
+    const [right, up] = this._axes();
+    const q = new THREE.Quaternion().setFromAxisAngle(up, -dx * this.rotateSpeed)
+      .multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * this.rotateSpeed));
+    const cam = this.camera;
+    cam.position.sub(this.target).applyQuaternion(q).add(this.target);
+    cam.quaternion.premultiply(q).normalize();
+    cam.up.set(0, 1, 0).applyQuaternion(cam.quaternion);
+  }
+
+  _depth() {
+    const [, , fwd] = this._axes();
+    const d = this.target.clone().sub(this.camera.position).dot(fwd);
+    return d > 1e-9 ? d : this.camera.position.distanceTo(this.target);
+  }
+
+  /** Move the board with the pointer: dx, dy in pixels. */
+  pan(dx, dy) {
+    const [right, up] = this._axes();
+    const k = (2 * this._depth() * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / Math.max(1, this.dom.clientHeight);
+    const off = right.multiplyScalar(-dx * k).add(up.multiplyScalar(dy * k));
+    this.camera.position.add(off);
+    this.target.add(off);
+  }
+
+  /** Zoom by factor s (< 1: closer) keeping the point under (x, y) where it is. */
+  zoom(s, x, y) {
+    const rect = this.dom.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    const [, , fwd] = this._axes();
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(fwd, this.target);
+    const p = ray.ray.intersectPlane(plane, new THREE.Vector3()) || this.target.clone();
+    const dist = this.camera.position.distanceTo(this.target) * s;
+    if (dist < this.minDistance || dist > this.maxDistance) return;
+    this.camera.position.sub(p).multiplyScalar(s).add(p);
+    this.target.sub(p).multiplyScalar(s).add(p);
+  }
+
+  onDown(e) {
+    if (e.pointerType === "mouse" && e.button > 2) return;
+    this.dom.setPointerCapture(e.pointerId);
+    this._ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this._ptrs.size === 1) {
+      this._mode = e.pointerType !== "mouse" ? "rotate" : e.button === 0 && !e.shiftKey && !e.ctrlKey ? "rotate" : "pan";
+    } else this._mode = "pinch";
+  }
+
+  onMove(e) {
+    const p = this._ptrs.get(e.pointerId);
+    if (!p) return;
+    if (this._mode === "pinch" && this._ptrs.size >= 2) {
+      const [a, b] = [...this._ptrs.values()];
+      const d0 = Math.hypot(a.x - b.x, a.y - b.y), m0 = [(a.x + b.x) / 2, (a.y + b.y) / 2];
+      p.x = e.clientX;
+      p.y = e.clientY;
+      const [c, d] = [...this._ptrs.values()];
+      const d1 = Math.hypot(c.x - d.x, c.y - d.y), m1 = [(c.x + d.x) / 2, (c.y + d.y) / 2];
+      if (d0 > 0 && d1 > 0) this.zoom(d0 / d1, m1[0], m1[1]);
+      this.pan(m1[0] - m0[0], m1[1] - m0[1]);
+      this.update();
+      return;
+    }
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    if (!dx && !dy) return;
+    if (this._mode === "rotate") this.rotate(dx, dy);
+    else if (this._mode === "pan") this.pan(dx, dy);
+    this.update();
+  }
+
+  onUp(e) {
+    this._ptrs.delete(e.pointerId);
+    if (this.dom.hasPointerCapture && this.dom.hasPointerCapture(e.pointerId)) this.dom.releasePointerCapture(e.pointerId);
+    this._mode = this._ptrs.size >= 2 ? "pinch" : this._ptrs.size === 1 ? "rotate" : null;
+  }
+
+  onWheel(e) {
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.dom.clientHeight : 1;
+    let dx = e.deltaX * unit, dy = e.deltaY * unit;
+    if (e.shiftKey && !dx) { dx = dy; dy = 0; }           // shift + wheel: sideways, where the browser does not swap
+    if (dy) this.zoom(Math.exp(dy * (e.ctrlKey ? 0.01 : 0.0012)), e.clientX, e.clientY);   // ctrl: a touchpad pinch
+    if (dx) this.pan(-dx, 0);
+    this.update();
+  }
+}
 
 function srgb(c) {
   return new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
@@ -54,6 +204,7 @@ export class Viewer {
     this.opts = opts;
     this.parts = [];          // {rec, group, mesh, lines, visible, viewHidden}
     this.hiddenKinds = new Set();
+    this.hideNames = new Set();   // bodies --hide leaves out, by name (pipeline.body_names)
     this.edges = true;
     this.seeThroughMask = false;
     this.section = null;      // {axis, t, flip}
@@ -71,14 +222,14 @@ export class Viewer {
     this.scene = new THREE.Scene();
     const pmrem = new THREE.PMREMGenerator(r);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.85;
+    this.scene.environmentIntensity = 1.0;
     pmrem.dispose();
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x404850, 0.5));
 
     const cam = (this.camera = new THREE.PerspectiveCamera(28, 1, 0.1, 1000));
     cam.up.set(0, 0, 1);
-    const head = new THREE.DirectionalLight(0xffffff, 1.6);   // follows the camera
-    head.position.set(0.35, 0.6, 0);
+    const head = new THREE.DirectionalLight(0xffffff, 1.7);   // follows the camera, from above left
+    head.position.set(-0.45, 0.75, 0.15);
     head.target.position.set(0, 0, -1);
     cam.add(head, head.target);
     this.scene.add(cam);
@@ -88,11 +239,7 @@ export class Viewer {
     this.caps = new THREE.Group();
     this.scene.add(this.caps);
 
-    const c = (this.controls = new OrbitControls(cam, r.domElement));
-    c.enableDamping = false;
-    c.zoomToCursor = true;
-    c.screenSpacePanning = true;
-    c.rotateSpeed = 0.9;
+    const c = (this.controls = new FreeControls(cam, r.domElement));
     c.addEventListener("change", () => this.render());
 
     this._down = null;
@@ -127,6 +274,7 @@ export class Viewer {
     this.clear();
     this.manifest = manifest;
     this.hiddenKinds = new Set(manifest.hidden || []);
+    this.hideNames = new Set(manifest.hide_names || []);
     for (const rec of manifest.parts) this._addPart(rec, buffer);
     const b = manifest.bounds;
     this.bounds = new THREE.Box3(new THREE.Vector3(b[0], b[1], b[2]), new THREE.Vector3(b[3], b[4], b[5]));
@@ -171,6 +319,9 @@ export class Viewer {
     const look = LOOK[rec.kind] || LOOK.component;
     const m = new THREE.MeshStandardMaterial({
       color, metalness: look.metal, roughness: look.rough, flatShading: true,
+      // the room's reflections make metal look like metal; on a laminate or a
+      // black solder mask they read as a grey sheen, so less of them there
+      envMapIntensity: look.metal > 0.5 ? 1.0 : 0.35,
       polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
     });
     this._setOpacity(m, rec);
@@ -202,8 +353,12 @@ export class Viewer {
   // ----------------------------------------------------------------------
   // what is shown
 
+  _hiddenByName(p) {
+    return (p.rec.names || []).some((n) => this.hideNames.has(n));
+  }
+
   _applyVisibility() {
-    for (const p of this.parts) p.group.visible = !p.viewHidden && !this.hiddenKinds.has(p.rec.kind);
+    for (const p of this.parts) p.group.visible = !p.viewHidden && !this.hiddenKinds.has(p.rec.kind) && !this._hiddenByName(p);
     for (const p of this.parts) if (p.lines) p.lines.visible = this.edges || p.rec.kind === "outline" || !p.mesh;
     if (this.section) this._buildCaps();
     this.render();
@@ -213,6 +368,12 @@ export class Viewer {
   /** Kinds the settings leave out of the model (paste, component). */
   setHiddenKinds(kinds) {
     this.hiddenKinds = new Set(kinds);
+    this._applyVisibility();
+  }
+
+  /** Bodies the settings leave out, by name (--hide silk-bot, copper-2, U1 ...). */
+  setHiddenNames(names) {
+    this.hideNames = new Set(names);
     this._applyVisibility();
   }
 
@@ -268,22 +429,23 @@ export class Viewer {
     return box.isEmpty() ? this.bounds.clone() : box;
   }
 
-  /** Look from a named direction (iso, top, bottom, front, back, left, right) at the whole board. */
+  /** Look from a named direction (see VIEWS) at the whole board. */
   view(name) {
-    const d = new THREE.Vector3(...(VIEWS[name] || VIEWS.iso)).normalize();
-    this._frame(this._visibleBox(), d);
+    const [d, up] = VIEWS[name] || VIEWS.iso;
+    this._frame(this._visibleBox(), new THREE.Vector3(...d).normalize(), new THREE.Vector3(...up));
   }
 
   /** Fit the board in the window, looking from where the camera is now. */
   fit() {
-    const d = this.camera.position.clone().sub(this.controls.target).normalize();
-    this._frame(this._visibleBox(), d);
+    const d = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion);
+    this._frame(this._visibleBox(), d, this.camera.up.clone());
   }
 
-  _frame(box, dir) {
+  _frame(box, dir, up) {
     // the distance at which every corner of the box is in the window, looking along -dir
     const center = box.getCenter(new THREE.Vector3());
     const cam = this.camera;
+    cam.up.copy(up);
     const look = new THREE.Matrix4().lookAt(dir, new THREE.Vector3(), cam.up);
     const inv = look.clone().invert();
     const tv = Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2), th = tv * cam.aspect;
@@ -319,9 +481,11 @@ export class Viewer {
   // ----------------------------------------------------------------------
   // section view: a clipping plane, the cut faces filled (stencil caps)
 
-  /** axis: "x", "y", "z" or null; t: 0..1 across the board; flip: keep the other side. */
-  setSection(axis, t = 0.5, flip = false) {
-    this.section = axis ? { axis, t, flip } : null;
+  /** axis: "x", "y", "z" or null; t: 0..1 across the board along the cut's
+   * normal; flip: keep the other side; turn: degrees about the board's
+   * normal; tilt: degrees out of the axis' plane (an oblique cut). */
+  setSection(axis, t = 0.5, flip = false, turn = 0, tilt = 0) {
+    this.section = axis ? { axis, t, flip, turn, tilt } : null;
     const plane = this._plane();
     for (const p of this.parts) {
       for (const o of [p.mesh, p.lines]) {
@@ -337,16 +501,32 @@ export class Viewer {
     this.render();
   }
 
+  /** The cut's normal (before flip): the axis, tilted, then turned about z. */
+  _sectionNormal() {
+    const s = this.section;
+    const n = new THREE.Vector3(...{ x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }[s.axis]);
+    const tiltAxis = s.axis === "x" ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    n.applyAxisAngle(tiltAxis, THREE.MathUtils.degToRad(s.tilt || 0));
+    n.applyAxisAngle(new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(s.turn || 0));
+    return n.normalize();
+  }
+
   _plane() {
     const s = this.section;
     if (!s) return null;
-    const i = { x: 0, y: 1, z: 2 }[s.axis];
-    const lo = this.bounds.min.getComponent(i), hi = this.bounds.max.getComponent(i);
+    const n = this._sectionNormal();
+    let lo = Infinity, hi = -Infinity;
+    const b = this.bounds, c = new THREE.Vector3();
+    for (let i = 0; i < 8; i++) {
+      c.set(i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z);
+      const d = n.dot(c);
+      lo = Math.min(lo, d);
+      hi = Math.max(hi, d);
+    }
     const at = lo + (hi - lo) * s.t;
-    const n = new THREE.Vector3();
-    n.setComponent(i, s.flip ? 1 : -1);
     if (!this._planeObj) this._planeObj = new THREE.Plane();
-    return this._planeObj.set(n, s.flip ? -at : at);
+    // keep what lies below the cut along n (above it with flip)
+    return this._planeObj.setFromNormalAndCoplanarPoint(s.flip ? n : n.clone().negate(), n.clone().multiplyScalar(at));
   }
 
   _clearCaps() {

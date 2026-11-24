@@ -415,3 +415,12 @@ def _thermal(ring, outer_extent, angle, n, gap, rounded=False, lw=0.0):
 
 def _poly(pts):
     return make_valid(Polygon(pts))
+
+
+def simplify(g, tol: float):
+    """Douglas-Peucker on every ring (topology kept): drops points that are
+    within tol of the line through their neighbours."""
+    if not tol or tol <= 0 or g is None or g.is_empty:
+        return g
+    import shapely
+    return clean(shapely.simplify(g, tol, preserve_topology=True))

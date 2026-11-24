@@ -36,7 +36,7 @@ KIND_COLOR = {"board_color": ("core", "dielectric", "board"), "copper_color": ("
               "silk_color": ("silk",), "paste_color": ("paste",), "plating_color": ("plating",),
               "cap_color": ("cap",), "finish_color": ("finish",), "fill_color": ("fill", "plug")}
 # what only the view changes: no new scene for these
-VIEW_ONLY = {"paste", "components"} | set(KIND_COLOR)
+VIEW_ONLY = {"paste", "components", "hide_bodies", "format", "mesh_from", "schema", "svg_dir"} | set(KIND_COLOR)
 
 
 class Gui(WebApp):
@@ -59,7 +59,11 @@ class Gui(WebApp):
         @self.route("GET", "/api/init")
         def init(req, q):
             return self.json(dict(model=O.option_model(), start=self.start, version=__version__,
-                                  window=self.window is not None, windows=os.name == "nt"))
+                                  window=self.window is not None, windows=os.name == "nt", prefs=load_prefs()))
+
+        @self.route("POST", "/api/prefs")
+        def prefs(req, q):
+            return self.json(save_prefs(req))
 
         @self.route("POST", "/api/state")
         def state(req, q):
@@ -140,6 +144,12 @@ class Gui(WebApp):
         out["origins"] = dict(getattr(o, "sources", {}) or {})
         out["switches"] = {a: bool(getattr(o, a, False)) for a in O.SHOW}
         out["switches"]["sanitize"] = o.sanitize != "none"
+        from .pipeline import hide_set
+        out["hide_names"] = sorted(hide_set(o))
+        try:
+            out["format"] = job.model_format() if not export else None
+        except SystemExit as exc:
+            out["error"] = str(exc.code if exc.code is not None else exc)
         out["geometry"] = self._geometry_key(req, export)
         out["warnings"] = list(job.srcs.notes)
         return out
@@ -209,8 +219,8 @@ class Gui(WebApp):
                 sc = S.model_scene(job, exact=exact)
                 model = sc.model
             manifest, blob = sc.pack()
-            extra = dict(stack=stack_rows(model), messages=messages + sc.info, seconds=round(time.time() - t0, 2),
-                         board=job.read().name)
+            extra = dict(stack=stack_rows(model, sc.parts if not spec else None), messages=messages + sc.info,
+                         seconds=round(time.time() - t0, 2), board=job.read().name)
             sid = self._keep(manifest, blob, extra)
             self.scene_keys[key] = sid
             return dict(id=sid, manifest=manifest, cached=False, **extra)
@@ -289,6 +299,33 @@ class Gui(WebApp):
             print(f"drag and drop: {exc}", file=sys.stderr)
 
 
+def prefs_path() -> str:
+    """The GUI's own preferences (panel widths): the window's look, not settings of the conversion."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "PCBFab2Step", "gui.json")
+
+
+def load_prefs() -> dict:
+    try:
+        with open(prefs_path(), encoding="utf-8") as f:
+            got = json.load(f)
+        return got if isinstance(got, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(update: dict) -> dict:
+    p = load_prefs()
+    p.update({k: v for k, v in (update or {}).items() if k in ("panels",)})
+    try:
+        os.makedirs(os.path.dirname(prefs_path()), exist_ok=True)
+        with open(prefs_path(), "w", encoding="utf-8") as f:
+            json.dump(p, f, indent=1)
+    except OSError:
+        pass
+    return p
+
+
 def written(lines: List[str]) -> List[str]:
     """The files a run wrote, from its messages ('Wrote X', 'Writing X ...')."""
     out = []
@@ -305,12 +342,15 @@ def written(lines: List[str]) -> List[str]:
     return out
 
 
-def stack_rows(m) -> List[dict]:
+def stack_rows(m, parts=None) -> List[dict]:
     """The board from top to bottom for the layers panel: every layer that can
-    be exported (with its targets), the dielectrics between them."""
+    be exported (with its targets) or left out of the model ('hide': its
+    --hide name), the dielectrics between them, the finish, and the ECAD
+    parts of each side (from the scene's parts) at the head of the list."""
     from . import exports
     st, o = m.stk, m.opts
     names = {L.name: L for L in m.board.layers}
+    merged = getattr(o, "external_only", False)
 
     def rgb(c):
         return [round(float(v), 4) for v in c] if isinstance(c, (tuple, list)) else None
@@ -320,20 +360,46 @@ def stack_rows(m) -> List[dict]:
             continue
         L = names.get(t.fab) or names.get(t.fab.replace(" stencil", ""))
         has = not (L is not None and getattr(L, "empty", False))
+        hide = None if t.kind == "stencil" else t.generic
+        if t.kind == "copper" and merged and t.side == "":
+            hide = None                                   # merged into the core
         rows.append(dict(kind=t.kind, side=t.side, name=t.fab, generic=t.generic, z=(t.z0 + t.z1) / 2,
-                         t=round(t.z1 - t.z0, 5), color=rgb(t.color), data=has))
+                         t=round(t.z1 - t.z0, 5), color=rgb(t.color), data=has, hide=hide,
+                         formats=list(exports.FORMATS) + mesh_formats()))
     for L in st.stack:
         if L.kind != "copper":
             rows.append(dict(kind="dielectric", side="", name=L.name, generic=None, z=(L.z0 + L.z1) / 2,
-                             t=round(L.t, 5), color=rgb(o.board_color), data=True, material=L.material or ""))
+                             t=round(L.t, 5), color=rgb(o.board_color), data=True, material=L.material or "",
+                             hide="core" if merged else L.name))
+    for c in m.components:
+        if c.get("kind") == "finish" and c.get("side"):
+            top = c["side"] == "top"
+            z = (st.z_top + 2e-6) if top else (st.z_bot - 2e-6)
+            rows.append(dict(kind="finish", side=c["side"], name=c.get("layer") or "finish",
+                             generic=f"finish-{'top' if top else 'bot'}", z=z, t=0.0, color=rgb(c["color"]),
+                             data=True, hide=f"finish-{'top' if top else 'bot'}", export=False))
     paste_z = {r["side"]: r["z"] for r in rows if r["kind"] == "paste"}
     for r in rows:
         if r["kind"] == "stencil":
             r["z"] = paste_z.get(r["side"], 0.0) + (1e-6 if r["side"] == "top" else -1e-6)
             r["t"] = round(o.stencil_thickness, 5)
     rows.sort(key=lambda r: -r["z"])
-    return [dict(kind="outline", side="", name="Board outline", generic="outline", z=0, t=0,
-                 color=rgb(o.board_color), data=True)] + rows
+    head = []
+    sides = {p.side for p in (parts or []) if p.kind == "component"}
+    for side in ("top", "bottom"):
+        if side in sides:
+            g = f"components-{'top' if side == 'top' else 'bot'}"
+            col = next((list(p.color) for p in parts if p.kind == "component" and p.side == side), [0.3, 0.3, 0.3])
+            head.append(dict(kind="components", side=side, name=f"Components {side}", generic=g, z=0, t=0,
+                             color=rgb(col), data=True, hide=g, formats=["step"] + mesh_formats()))
+    return head + [dict(kind="outline", side="", name="Board outline", generic="outline", z=0, t=0,
+                        color=rgb(o.board_color), data=True, hide=None,
+                        formats=list(exports.FORMATS) + mesh_formats())] + rows
+
+
+def mesh_formats() -> List[str]:
+    from .meshfile import FORMATS
+    return list(FORMATS)
 
 
 def open_path(path: str) -> bool:

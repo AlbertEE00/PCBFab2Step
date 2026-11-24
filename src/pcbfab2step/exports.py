@@ -39,7 +39,7 @@ import numpy as np
 import shapely
 
 from .common import info
-from .geometry import clean, gdiff, ginter, iter_polys
+from .geometry import clean, gdiff, ginter, iter_polys, simplify
 
 FORMATS = ("dxf", "svg", "step")
 STENCIL_GREY = (0.72, 0.74, 0.76)
@@ -156,9 +156,10 @@ def parse_export(spec: str, output: Optional[str]):
         formats = ["step" if ext == "stp" else ext] if ext else []
     if not formats:
         raise SystemExit(f"--export {spec}: add the format, e.g. {name}:dxf, {name}:svg or {name}:step")
-    bad = [f for f in formats if f not in FORMATS]
+    from .meshfile import FORMATS as MESH
+    bad = [f for f in formats if f not in FORMATS and f not in MESH]
     if bad:
-        raise SystemExit(f"--export {spec}: unknown format '{bad[0]}' (dxf, svg, step)")
+        raise SystemExit(f"--export {spec}: unknown format '{bad[0]}' (dxf, svg, step, {', '.join(MESH)})")
     return name.strip(), formats
 
 
@@ -218,6 +219,9 @@ def layer_geometry(model, spec: str, opts, output: Optional[str] = None):
         if inv:
             geom = clean(gdiff(B, geom))
         geom = drop_edge_slivers(geom, B)
+        if t.kind == "silk":
+            geom = simplify(geom, getattr(opts, "silk_simplify", 0.0))
+        geom = simplify(geom, getattr(opts, "simplify", 0.0))
     if t.kind != "outline" and geom.is_empty:
         raise SystemExit(f"--export {name}{' --invert' if inv else ''}: the layer is empty")
     label = (t.fab if canon(name) == canon(t.fab) else t.generic) + ("_inverted" if inv else "")
@@ -243,10 +247,25 @@ def export(model, spec: str, opts, out_dir: str, base: str, output: Optional[str
                 write_dxf(path, geom, outl, label)
             else:
                 write_svg(path, geom, outl, t.color)
-        else:
+        elif fmt == "step":
             write_layer_step(path, model, t, geom, bool(with_outline), label, opts)
+        else:
+            written += write_layer_mesh(path, model, t, geom, bool(with_outline), label, opts, fmt)
+            continue
         written.append(path)
     return written
+
+
+def write_layer_mesh(path, model, t: Target, geom, with_board, label, opts, fmt) -> List[str]:
+    """A layer as a mesh file: the bodies of the layer STEP, meshed."""
+    from . import meshfile
+    from .scene import MeshGeo, Part, realize
+    parts = []
+    for name, kind, color, g, z0, z1 in layer_step_bodies(model, t, geom, with_board, label, opts):
+        mesh = realize([MeshGeo.prisms(g, z0, z1)])[0]
+        if len(mesh.tri):
+            parts.append(Part(name, kind, tuple(color), mesh, ("PCB",) if kind == "board" else ()))
+    return meshfile.write(path, parts, label, fmt)
 
 
 # --------------------------------------------------------------------------
