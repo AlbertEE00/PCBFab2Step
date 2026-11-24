@@ -95,7 +95,8 @@ def test_fab_folder_reads_nc_drill(tmp_path, odb_job, capsys):
     (fab / "NCDRILL" / "testjob.DRR").write_text(
         "CounterHole : Counterholes Top\nASCII RoundHoles File : testjob.TX2\n\n"
         "Tool       Hole Size     Hole Tolerance   Hole Type   Hole Count   Plated   Tool Travel     Depth     Angle\n"
-        "T1      2mm (79mil)                       Round       1            NPTH     0mm (0inch)     0.3mm (11.811mil)   0\n")
+        "T1      2mm (79mil)                       Round       1            NPTH     0mm (0inch)     "
+        "0.3mm (11.811mil)   0\n")
     (fab / "NCDRILL" / "testjob.TX2").write_text("M48\n;FILE_FORMAT=4:4\nMETRIC,LZ\nT01F00S00C2.0000\n%\nT01\n"
                                                  "X0010Y0010\nM30\n")
     assert main(["info", str(fab)]) == 0

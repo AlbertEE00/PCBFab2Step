@@ -111,7 +111,8 @@ IPC_XML = textwrap.dedent("""\
             <PadStack net="GND">
               <LayerHole name="Via_2" diameter="0.3" platingStatus="VIA" x="35" y="30">
                 <Span fromLayer="TOP" toLayer="BOT"/></LayerHole>
-              <LayerPad layerRef="Bottom Solder"><Location x="35" y="30"/><StandardPrimitiveRef id="CIRCLE_2"/></LayerPad>
+              <LayerPad layerRef="Bottom Solder"><Location x="35" y="30"/>
+                <StandardPrimitiveRef id="CIRCLE_2"/></LayerPad>
             </PadStack>
             <PadStack net="GND">
               <LayerPad layerRef="TOP"><Xform rotation="90"/><Location x="20" y="15"/>

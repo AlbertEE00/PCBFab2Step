@@ -593,6 +593,8 @@ class IpcReader:
                 L.points_fn = (lambda L=L: self.doc_points(L))
             if kind == "mask":
                 L.mask_split_fn = (lambda nm=name: self.mask_split(nm))
+            if kind == "copper":
+                L.pads_fn = (lambda vias, nm=name: self.pads_image(nm, vias))
             out.append(L)
         return out
 
@@ -640,6 +642,11 @@ class IpcReader:
         if pads:
             acc = union_all([acc] + pads)
         return acc
+
+    def pads_image(self, name: str, vias: bool = True):
+        """The padstack pads of a copper layer: component pads, and via pads with vias."""
+        g = [self.geo.placed(lp) for lp in self.pads.get(name, ()) if vias or id(lp) not in self._via_lp]
+        return union_all([x for x in g if x is not None and not x.is_empty]) if g else EMPTY
 
     def mask_split(self, name: str):
         """Solder mask layer: (openings of everything but the vias, [(x, y, opening)]

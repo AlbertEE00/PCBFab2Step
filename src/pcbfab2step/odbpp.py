@@ -1443,6 +1443,20 @@ class OdbReader:
                 parts.append(m_apply(M, g))
         return union_all(parts)
 
+    def pads_image(self, L: Layer, vias: bool = True):
+        """Pad features (P records) of a copper layer; without vias, pads with
+        .pad_usage=via are left out."""
+        def keep(r):
+            return r.kind == "P" and (vias or (r.attrs or {}).get(".pad_usage") != "via")
+        parts = []
+        for s, M in self.instances:
+            ff = self.ff(s, L.key)
+            if ff.records:
+                g = self.R.render(ff, select=keep)
+                if not g.is_empty:
+                    parts.append(m_apply(M, g))
+        return union_all(parts) if parts else EMPTY
+
     def mask_split(self, L: Layer):
         """Solder mask layer: (openings of everything but the vias, [(x, y, opening)]
         of the vias' own openings, the pads with .pad_usage=via). None when the
@@ -1481,6 +1495,8 @@ class OdbReader:
         steps_used = sorted({s for s, _ in self.instances})
         for L in self.layers:
             L.image_fn = (lambda L=L: self.raw_image(L))
+            if L.kind == "copper":
+                L.pads_fn = (lambda vias, L=L: self.pads_image(L, vias))
             has = any(self.ff(s, L.key).records for s in steps_used)
             L.empty = not has and not L.polarity.upper().startswith("NEG")
             if L.kind == "copper":

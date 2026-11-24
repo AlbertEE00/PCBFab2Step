@@ -49,6 +49,25 @@ counterholes (ODB++ has no type, angle or depth for them):
   --counterbore 3.2:6.0:1.5:bottom          3.2 mm holes get a 6.0 mm counterbore, 1.5 mm deep
   --countersink 3.4:6.5:90:top              3.4 mm holes get a 6.5 mm, 90 degree countersink
 
+layer exports (any layer as DXF, SVG or STEP, same origin as the model; 'pcbfab2step info' lists
+the layer names; files go to the fab folder's EXPORT/, else exports/ beside the input):
+  --export "Bottom Paste:dxf,svg"            layer by its fab data name (case-insensitive)
+  --export "Bottom Paste:step:invert" --outline
+                                            stencil plate: outline minus the paste openings,
+                                            --stencil-thickness thick, on the PCB as a plain slab
+  --paste-dxf --outline-svg --solder-step   short forms (paste/solder/silk: both sides)
+  --use-generic-names --export paste-bot     generic names: outline, paste-top/bot, solder-top/bot,
+                                            silk-top/bot, copper-top/bot, copper-N
+  --invert [LAYER ...]                      invert the named (or all) exported layers
+  --no-step                                 exports only, no STEP model
+  DXF/SVG include the outline unless --no-outline; STEP only with --outline.
+
+hiding design detail:
+  --external-only                           outer copper only, inner layers merged into one core;
+                                            vias not drilled (--vias to drill them)
+  --pads-only | --exposed-copper            outer copper: pads only, or pads plus the copper the
+                                            solder mask leaves open
+
 via protection rules (--via-protection, repeatable, applied after the fab data and the --via-* settings):
   TYPE[:key=value...]   TYPE = IPC-4761 type 1a 1b 2a 2b 3a 3b 4a 4b 5 6a 6b 7 or none
                         (roman numerals accepted: VII, VI-b, ...); 'a' types act on the top side
@@ -158,6 +177,42 @@ def build_parser() -> argparse.ArgumentParser:
                      ("fill", "auto: by fill material"), ("cap", "#d8894a"), ("paste", "#a6a6a6")):
         cg.add_argument(f"--{key}-color", default=None, help=hlp)
 
+    mg = p.add_argument_group("model content (hide design detail)")
+    mg.add_argument("--external-only", action="store_true",
+                    help="outer copper only; the inner layers and dielectrics become one core body, like "
+                         "Altium's STEP. Implies --no-vias unless --vias")
+    mg.add_argument("--vias", action=argparse.BooleanOptionalAction, default=None,
+                    help="drill the vias (default: yes, no with --external-only); their pads stay either way")
+    mg.add_argument("--pads-only", dest="outer_copper", action="store_const", const="pads", default="all",
+                    help="outer copper layers: pads only (no traces or pours)")
+    mg.add_argument("--exposed-copper", dest="outer_copper", action="store_const", const="exposed",
+                    help="outer copper layers: pads plus the copper the solder mask leaves open")
+
+    xg = p.add_argument_group(
+        "layer exports (DXF, SVG, STEP; same origin as the model; written to the fab folder's EXPORT/, "
+        "else exports/ beside the input)")
+    xg.add_argument("--export", action="append", nargs="+", metavar="LAYER[:FMT,..][:invert]",
+                    help="layers to export by their fab data name (see 'pcbfab2step info'), 'outline' or "
+                         "'all'; formats dxf, svg, step (default dxf,svg)")
+    xg.add_argument("--invert", nargs="*", default=None, metavar="LAYER",
+                    help="export these layers inverted: outline minus the layer (a paste stencil); "
+                         "no LAYER: every exported layer")
+    xg.add_argument("--outline", dest="export_outline", action=argparse.BooleanOptionalAction, default=None,
+                    help="include the board outline: DXF/SVG on by default, STEP adds the board as a slab "
+                         "only with --outline")
+    xg.add_argument("--stencil-thickness", type=float, default=0.12,
+                    help="thickness of an inverted layer in STEP, mm (0.12)")
+    xg.add_argument("--use-generic-names", action="store_true",
+                    help="name layers outline, paste-top/bot, solder-top/bot, silk-top/bot, copper-top/bot, "
+                         "copper-N instead of the fab data names")
+    xg.add_argument("--no-step", dest="write_model", action="store_false", default=True,
+                    help="write the exports only, no STEP model")
+    for kind in ("outline", "paste", "solder", "silk"):
+        for fmt in ("dxf", "svg", "step"):
+            xg.add_argument(f"--{kind}-{fmt}", action="store_true",
+                            help=f"short for --export {kind}:{fmt} (both sides)" if kind != "outline" else
+                            f"short for --export outline:{fmt}")
+
     og = p.add_argument_group("geometry and output")
     og.add_argument("--arc-tolerance", type=float, default=None, help="tessellation chord error, mm (0.001)")
     og.add_argument("--arc-fit", choices=["loose", "strict", "off"], default=None,
@@ -215,7 +270,7 @@ def default_output(primary: str, name: str, fab: Optional[str]) -> str:
 
 
 def convert(args) -> int:
-    from . import ipc2581, ncdrill, odbpp
+    from . import exports, ipc2581, ncdrill, odbpp
     from .brep import ArcFit, Brep, write_step
     from .builder import Model, parse_size_rule, write_svgs
     from .geometry import Tess
@@ -242,6 +297,12 @@ def convert(args) -> int:
         parse_size_rule(spec, "countersink")
     if args.list:
         opts.list = True
+    for k in ("external_only", "vias", "outer_copper", "export_outline", "stencil_thickness"):
+        setattr(opts, k, getattr(args, k))
+    try:
+        export_reqs = exports.collect_requests(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     Tess.tol = max(1e-5, opts.arc_tolerance)
     ArcFit.enabled = opts.arc_fit != "off"
     ArcFit.strict = opts.arc_fit == "strict"
@@ -288,6 +349,16 @@ def convert(args) -> int:
     model.prepare()
     model.report()
     if args.list:
+        info("\nExport layers (fab name / generic name):")
+        for e in exports.available(model):
+            info(f"  {e.fab:<28} {e.generic}")
+        return 0
+    if export_reqs:
+        info("\nExports:")
+        exports.run(model, export_reqs, opts, exports.export_dir(srcs.fab, srcs.primary_path, args.output),
+                    board.name, args.use_generic_names)
+    if not args.write_model:
+        info(f"\nDone in {time.time() - t0:.1f} s (no STEP model: --no-step)")
         return 0
     info("\nBuilding solids ...")
     model.build()

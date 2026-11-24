@@ -207,6 +207,53 @@ layer for checking.
 per-body validity, volume, z range and face types (and overlaps between
 bodies); `tools/section_plot.py` draws a cross-section.
 
+## Layer exports
+
+Any layer can be written on its own as DXF, SVG or STEP, in the board's own
+coordinates, so it lines up with the STEP model (same origin; bottom layers
+are seen from the top, as in Gerber). `pcbfab2step info` lists the layer
+names. The files go to the fab folder's `EXPORT/`, or to `exports/` beside
+the input.
+
+```
+pcbfab2step FAB --export "Bottom Paste:dxf,svg"           # paste openings + outline
+pcbfab2step FAB --export "Bottom Paste:step:invert" --outline --no-step
+pcbfab2step FAB --paste-dxf --outline-svg                 # short forms
+pcbfab2step FAB --use-generic-names --export paste-bot:step solder-bot:svg
+```
+
+- Layer names: the fab data names (case-insensitive, spaces/underscores
+  ignored), `outline`, or `all`. With `--use-generic-names`: `outline`,
+  `paste-top/bot`, `solder-top/bot`, `silk-top/bot`, `copper-top/bot`,
+  `copper-N` (N counted from the top).
+- Formats per layer after a colon, default `dxf,svg`. `:invert` (or
+  `--invert [LAYER ...]`) exports the outline minus the layer: a paste
+  stencil plate.
+- Short forms: `--paste-{dxf,svg,step}`, `--solder-...`, `--silk-...`
+  (both sides) and `--outline-{dxf,svg,step}`.
+- DXF and SVG include the board outline unless `--no-outline`. STEP has the
+  layer alone at its place in the model; `--outline` adds the PCB as a plain
+  slab (the shell). An inverted layer in STEP sits on the board surface,
+  `--stencil-thickness` thick (0.12 mm).
+- The STEP model is still written; `--no-step` writes the exports only.
+- DXF is R12 with closed polylines in mm (layers `OUTLINE` and the layer's
+  name); arcs are polylines at the tessellation tolerance. SVG is in mm, the
+  layer filled and the outline as a line. Drills are not cut from 2D
+  exports: they show the layer as in the fab data.
+
+## Hiding design detail
+
+- `--external-only`: only the outer copper layers; the inner copper and all
+  dielectrics become one core body, like Altium's STEP. Vias are not drilled
+  (`--vias` to drill them), and their pads stay.
+- `--no-vias`: vias are not drilled, with any model.
+- `--pads-only`: the outer copper is pads only (no traces or pours).
+- `--exposed-copper`: pads plus the copper the solder mask leaves open; on a
+  side without solder mask all copper stays.
+
+Pads come from the data: ODB++ pad features (P records, vias by
+`.pad_usage=via`), IPC-2581 padstack pads.
+
 ## Limitations
 
 - Gerber input is not read yet.
@@ -248,6 +295,12 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 1.4.0: layer exports (`--export`, short forms such as `--paste-dxf`,
+  `--invert`, `--outline`, `--stencil-thickness`, `--use-generic-names`,
+  `--no-step`): any layer as DXF, SVG or STEP with the model's origin, an
+  inverted layer as a stencil plate. Hiding design detail:
+  `--external-only` (inner layers merged into one core), `--no-vias`,
+  `--pads-only`, `--exposed-copper`. `info` lists the export layer names.
 - 1.3.0: a fab folder is read as a whole: its NC drill output by default
   (exact counterbore depths, also for an IPC-2581 primary), and next to an
   IPC-2581 primary the ODB++ via types; sources describing the same

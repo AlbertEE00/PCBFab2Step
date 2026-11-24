@@ -317,6 +317,23 @@ class Model:
             g = gdiff(self.B, g)
         return clean(ginter(g, self.B))
 
+    def copper_image(self, L: Layer):
+        """Copper image; with --pads-only the pads alone on the outer layers."""
+        st = self.stk.stack
+        mode = getattr(self.opts, "outer_copper", "all")
+        if mode == "all" or L not in (st[0], st[-1]) or L.pads_fn is None:
+            return self.image(L)
+        vias = any(h.kind == "via" for h in self.holes)
+        g = L.pads_fn(vias)
+        if mode == "exposed":
+            # plus the copper the solder mask leaves open (pours, exposed traces)
+            side = "top" if L is st[0] else "bottom"
+            masks = [] if self.opts.no_mask else self.stk.coats[side].get("mask", [])
+            if not masks:
+                return self.image(L)              # no solder mask: all of it is exposed
+            g = union_all([g, ginter(self.image(L), union_all(self.image(M) for M in masks))])
+        return clean(ginter(g, self.B))
+
     # .. preparation ..........................................................
     def prepare(self):
         B = self.board.outline
@@ -329,6 +346,7 @@ class Model:
             B = box(x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5)
         self.B = clean(B)
         self.svg["profile"] = self.B
+        self._drop_vias()
         self._drop_backdrill_duplicates()
         self._place_holes()
         self._doc_layer_protection()
@@ -338,6 +356,29 @@ class Model:
         self._resolve_caps()
         self._resolve_tents()
         self._build_cuts()
+
+    def _drop_vias(self):
+        """--no-vias (default with --external-only): vias are not drilled; their
+        pads stay on the copper. Their back drills go with them."""
+        o = self.opts
+        vias = getattr(o, "vias", None)
+        if vias is None:
+            vias = not getattr(o, "external_only", False)
+        if vias:
+            return
+        gone = [h for h in self.holes if h.kind == "via"]
+        if not gone:
+            return
+        self.holes = [h for h in self.holes if h.kind != "via"]
+        idx = PointIndex(0.02)
+        for h in gone:
+            idx.add(h.x, h.y, h)
+        n_bd = len(self.board.backdrills)
+        self.board.backdrills = [b for b in self.board.backdrills if idx.find(b.x, b.y) is None]
+        self.hole_notes.append(f"vias not drilled: {len(gone)} via(s) left out"
+                               + (f" with {n_bd - len(self.board.backdrills)} back drill(s)"
+                                  if n_bd != len(self.board.backdrills) else "")
+                               + "; their pads stay (--vias to drill them)")
 
     def _surface(self, side):
         return self.stk.z_top if side == "top" else self.stk.z_bot
@@ -1142,12 +1183,21 @@ class Model:
         n = len(st)
         cache: Dict[tuple, object] = {}
         t0 = time.time()
-        cu_img = {L.key: self.image(L) for L in st if L.kind == "copper"}
+        ext = getattr(o, "external_only", False)
+        cu_img = {L.key: self.copper_image(L) for i, L in enumerate(st)
+                  if L.kind == "copper" and not (ext and 0 < i < n - 1)}
         for k, g in cu_img.items():
             self.svg[f"copper_{k}"] = g
         diel_extra: Dict[int, list] = defaultdict(list)
         stack_comps = []
+        if ext and n > 2:
+            # outer copper only; everything between is one core body, like Altium's STEP
+            z0, z1 = st[-1].z1, st[0].z0
+            core = self.slab(self.B, z0, z1, cache, label="dielectric_core")
+            self._comp(f"Core ({z1 - z0:.4f} mm, inner layers merged)", o.board_color, core, "CORE")
         for i, L in enumerate(st):
+            if ext and n > 2 and 0 < i < n - 1:
+                continue
             info(f"  building {L.name} ...", 2)
             if L.kind == "copper":
                 solids = self.slab(cu_img[L.key], L.z0, L.z1, cache)

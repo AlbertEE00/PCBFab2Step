@@ -49,6 +49,8 @@ class Layer:
     # solder mask layers: (openings of everything but the vias, [(x, y, opening)] of each
     # via's own opening), or None when the data does not say which openings are the vias'
     mask_split_fn: Optional[Callable[[], Optional[tuple]]] = None
+    # copper layers: (include_vias) -> image of the pads only (no traces or pours)
+    pads_fn: Optional[Callable[[bool], object]] = None
     implicit: bool = False
     # set by the builder
     side: str = ""
