@@ -10,14 +10,15 @@ from types import SimpleNamespace
 import pytest
 
 from pcbfab2step.config import (ConfigError, config_template, init_fab_folder, parse_counterhole_spec, resolve)
-from pcbfab2step.pcbfab2step import build_parser, join_counterhole_args
+from pcbfab2step.cli import build_parser, join_counterhole_args
 
 
 def test_template_parses_and_defers_to_fab_data():
     cfg = tomllib.loads(config_template("test"))
     o = resolve(SimpleNamespace(), cfg)
     assert o.mask_thickness is None and o.board_thickness is None and o.plating_thickness is None
-    assert o.via_fill is None and o.ncdrill is None
+    assert o.via_fill is None and o.use_sources in (None, "auto") and o.sanitize == "none"
+    assert o.stencil_thickness == 0.1 and o.aperture_offset == 0.0
     assert o.counterhole["top"] == {"type": None, "angle": None, "depth": None}
     assert o.sources.get("mask_thickness") is None
 

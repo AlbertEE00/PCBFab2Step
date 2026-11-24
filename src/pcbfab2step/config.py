@@ -86,17 +86,25 @@ def finish_color_for(material: str) -> str:
 
 SCHEMA = [
     ("output", "file", "output", "str", None, "default",
-     "STEP file to write; default: <board name>.step in the fab folder (or next to the input)"),
+     "STEP model to write (default: PCBFab2Step/<board>.step in the folder given)"),
     ("output", "schema", "schema", ("AP214", "AP242", "AP203"), "AP214", "AP214", "STEP application protocol"),
     ("output", "svg_dir", "svg_dir", "str", None, "default", "also write the 2D layer regions as SVG files here"),
 
-    ("sources", "primary", "source", ("odb", "ipc2581"), None, "default",
-     "geometry source when both are present: odb or ipc2581 (default: odb, the IPC-2581 then supplies "
-     "counterhole types and angles)"),
-    ("sources", "ncdrill", "ncdrill", "ncdrill", None, "default",
-     "read NC drill output (counterhole depths and angles): false, true (search NCDRILL/ and beside the "
-     "input) or a path (default: read when the fab folder has an NC drill subfolder)"),
-    ("sources", "step", "step", "str", None, "default", "ODB++ step to convert (default: pcb)"),
+    ("sources", "use", "use_sources", "str", None, "auto",
+     "which of the found sources to use, the first geometry source as the board: odb, ipc, drill, step, "
+     "e.g. \"ipc+drill+step\" (auto: all found, ODB++ before IPC-2581)"),
+    ("sources", "odb_step", "odb_step", "str", None, "default", "ODB++ step to convert (default: pcb)"),
+
+    ("model", "sanitize", "sanitize", ("none", "outer", "exposed", "pads"), "none", "none",
+     "hide design detail: outer (inner layers merged into one core, vias not drilled), exposed (also "
+     "outer copper cut to pads and the copper the solder mask leaves open), pads (outer copper: pads only)"),
+    ("model", "components", "components", "bool", True, True,
+     "add the components of the ECAD STEP export when one is found"),
+
+    ("export", "stencil_thickness", "stencil_thickness", "mm", 0.1, 0.1,
+     "stencil plate thickness for --export stencil-...:step, mm"),
+    ("export", "aperture_offset", "aperture_offset", "length", 0.0, 0.0,
+     "grow (+) or shrink (-) the features of an exported layer, e.g. stencil apertures: -0.05 mm"),
 
     ("stackup", "board_thickness", "board_thickness", "mm", None, "default",
      "copper-to-copper thickness, mm; scales the dielectrics to match (default: fab data)"),
@@ -250,14 +258,30 @@ def _is_default(v) -> bool:
     return v is None or (isinstance(v, str) and v.strip().lower() in ("default", "auto-default", ""))
 
 
+UNITS = {"mm": 1.0, "um": 0.001, "µm": 0.001, "mil": 0.0254, "mils": 0.0254, "thou": 0.0254, "in": 25.4,
+         "inch": 25.4, "inches": 25.4, '"': 25.4, "cm": 10.0}
+
+
+def parse_length(v, where: str = "") -> float:
+    """'0.1', '0.1mm', '4mil', '-2 mil', '0.004in', '100um' -> mm."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    m = re.fullmatch(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-zµ\"]*)\s*", str(v), re.I)
+    if not m or m.group(2).lower() not in UNITS and m.group(2) != "":
+        raise ConfigError(f"{where + ': ' if where else ''}'{v}' is not a length (mm, um, mil, in)")
+    return float(m.group(1)) * UNITS.get(m.group(2).lower() or "mm", 1.0)
+
+
 def _convert(kind, v, where: str):
     """Config / command line value -> Python value of the setting."""
     try:
         if kind == "mm":
-            f = float(v)
+            f = parse_length(v, where)
             if f < 0:
                 raise ConfigError(f"{where}: {v} must be >= 0")
             return f
+        if kind == "length":
+            return parse_length(v, where)
         if kind == "float":
             return float(v)
         if kind == "int":
@@ -281,10 +305,6 @@ def _convert(kind, v, where: str):
             if isinstance(v, str):
                 return [v]
             return [str(x) for x in v]
-        if kind == "ncdrill":
-            if isinstance(v, bool):
-                return "" if v else None
-            return str(v)
         if isinstance(kind, tuple):
             t = str(v).strip()
             for c in kind:
@@ -331,9 +351,10 @@ def resolve(cli, cfg: Optional[dict], cfg_label: str = "config.toml") -> SimpleN
     cfg = cfg or {}
     o = SimpleNamespace()
     sources: Dict[str, str] = {}
+    labels = getattr(cli, "_labels", {}) or {}
     for sec, key, attr, kind, builtin, _tmpl, _c in SCHEMA:
         v = getattr(cli, attr, None)
-        flag = "--" + attr.replace("_", "-")
+        flag = labels.get(attr, "--" + attr.replace("_", "-"))
         if v is not None and not (kind == "list" and v == []):
             val = _convert(kind, v, flag) if kind != "list" else list(v)
             sources[attr] = flag
@@ -368,12 +389,12 @@ def resolve(cli, cfg: Optional[dict], cfg_label: str = "config.toml") -> SimpleN
     cli_lt = {}
     for item in getattr(cli, "layer_thickness", None) or []:
         if "=" not in item:
-            raise ConfigError(f"--layer-thickness expects LAYER=MM, got '{item}'")
+            raise ConfigError(f"--thickness expects LAYER=SIZE, got '{item}'")
         k, v = item.split("=", 1)
-        cli_lt[k.strip()] = _convert("mm", v, "--layer-thickness")
+        cli_lt[k.strip()] = _convert("mm", v, f"--thickness {k.strip()}")
     if cli_lt:
         lt.update(cli_lt)
-        sources["layer_thickness"] = "--layer-thickness" if not tab else f"--layer-thickness / {cfg_label}"
+        sources["layer_thickness"] = "--thickness" if not tab else f"--thickness / {cfg_label}"
     o.layer_thickness = lt
     # counterholes per side
     o.counterhole = resolve_counterholes(cli, cfg, cfg_label)
@@ -438,16 +459,12 @@ def config_template(version: str) -> str:
         "#",
         "# Precedence: command line > this file > fab data (ODB++, IPC-2581, NC drill) > built-in defaults.",
         '# "default" keeps the fab data where it has the value, else the built-in default given in the',
-        "# comment. Any other value overrides the fab data. Lengths are millimetres.",
+        "# comment. Any other value overrides the fab data. Sizes are mm unless a unit is given",
+        '# ("4mil", "0.004in", "100um"). On the command line: --set SECTION.KEY=VALUE.',
         "#",
-        "# Fab folder layout (any of these may be empty; a single file given on the command line works too):",
-        "#   ODB++/     ODB++ product model (.tgz, .tar, .zip or folder): the geometry",
-        "#   IPC2581/   IPC-2581 (.cvg or .xml): the geometry, or next to ODB++ the counterhole types and angles",
-        "#   NCDRILL/   NC drill output (.DRR report and drill files): counterhole depths; read by default",
-        "#              when present ([sources] ncdrill = false or --no-ncdrill to leave it out)",
-        "#   GERBER/    Gerber files (not read yet)",
-        "#   STEP/      the ECAD's STEP export (Altium: board plus components): its components are added",
-        "#   EXPORT/    written by pcbfab2step: the STEP model and the layer exports",
+        "# The fab outputs may sit anywhere below this folder (Altium's ODB++/, IPC-2581/, NC Drill/,",
+        "# STEP/ or flat): ODB++ or IPC-2581 gives the board, NC drill reports the counterhole depths,",
+        "# the ECAD's STEP export its components. Results go to PCBFab2Step/ in this folder.",
     ]
     sections: List[str] = []
     for sec, *_ in SCHEMA:

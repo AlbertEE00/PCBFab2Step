@@ -5,6 +5,6 @@
 
 import sys
 
-from .pcbfab2step import main
+from .cli import main
 
 sys.exit(main())

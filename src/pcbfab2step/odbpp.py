@@ -1407,7 +1407,7 @@ class OdbReader:
         names = [s.lower() for s in self.steps] or self.job.listdir("steps")
         if not names:
             raise SystemExit("the product model has no steps")
-        want = getattr(self.opts, "step", None)
+        want = getattr(self.opts, "odb_step", None)
         if want:
             if want.lower() not in names:
                 raise SystemExit(f"step '{want}' not found; available: {', '.join(names)}")

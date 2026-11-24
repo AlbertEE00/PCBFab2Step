@@ -115,7 +115,7 @@ def test_open_backdrill_without_fill(ipc_file, opts):
 
 def test_fill_and_caps_in_step(ipc_file, tmp_path):
     pytest.importorskip("OCP")
-    from pcbfab2step.pcbfab2step import main
+    from pcbfab2step.cli import main
     out = tmp_path / "b.step"
     assert main([ipc_file, "-o", str(out), "-q"]) == 0
     text = out.read_text(encoding="latin-1")

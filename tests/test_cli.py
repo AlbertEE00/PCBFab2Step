@@ -8,43 +8,91 @@ import shutil
 
 import pytest
 
-from pcbfab2step.pcbfab2step import main
-from pcbfab2step.sources import choose, discover
+from pcbfab2step.cli import main
+from pcbfab2step.sources import OUTPUT_DIR, choose, discover, kind_of
+
+DRR = ("CounterHole : Counterholes Top\nASCII RoundHoles File : testjob.TX2\n\n"
+       "Tool       Hole Size     Hole Tolerance   Hole Type   Hole Count   Plated   Tool Travel     Depth     Angle\n"
+       "T1      2mm (79mil)                       Round       1            NPTH     0mm (0inch)     "
+       "0.3mm (11.811mil)   0\n")
+TX2 = "M48\n;FILE_FORMAT=4:4\nMETRIC,LZ\nT01F00S00C2.0000\n%\nT01\nX0010Y0010\nM30\n"
 
 
-def test_list_ipc(ipc_file, capsys):
-    assert main([ipc_file, "--list"]) == 0
+def altium_outputs(root, ipc_file, odb_job, drill=True):
+    """An Altium OutJob output folder: ODB++/odb, IPC-2581/, NC Drill/."""
+    shutil.copytree(odb_job, root / "ODB++" / "odb")
+    (root / "IPC-2581").mkdir()
+    shutil.copy(ipc_file, root / "IPC-2581" / "board.cvg")
+    if drill:
+        (root / "NC Drill").mkdir()
+        (root / "NC Drill" / "testjob.DRR").write_text(DRR)
+        (root / "NC Drill" / "testjob.TX2").write_text(TX2)
+    return root
+
+
+def test_info_ipc(ipc_file, capsys):
+    assert main(["info", ipc_file]) == 0
     out = capsys.readouterr().out
-    assert "countersink 4.000 mm from top" in out and "IPC-2581 rev B" in out
+    assert "countersink 4.000 mm from top" in out and "IPC-2581 rev B" in out and "Export targets" in out
 
 
-def test_info_odb(odb_job, capsys):
+def test_info_odb_counterhole(odb_job, capsys):
     assert main(["info", odb_job, "--counterhole-top", "type=sink", "angle=100"]) == 0
     out = capsys.readouterr().out
     assert "countersink 2.000 mm from top" in out and "100 deg" in out
 
 
-def test_fab_folder_discovery(tmp_path, ipc_file, odb_job):
-    fab = tmp_path / "FAB"
-    assert main(["init", str(fab)]) == 0
-    shutil.copytree(odb_job, fab / "ODB++" / "testjob")
-    shutil.copy(ipc_file, fab / "IPC2581" / "board.cvg")
-    s = choose(discover([str(fab)]), None, None)
-    assert s.primary == "odb" and s.secondary_ipc.endswith("board.cvg")
-    assert s.config and s.config.endswith("config.toml")
-    s = choose(discover([str(fab)]), "ipc2581", None)
-    assert s.primary == "ipc2581" and s.secondary_ipc is None
-    s = choose(discover([str(fab)]), None, "off")
-    assert s.secondary_ipc is None
+def test_discovery_any_layout(tmp_path, ipc_file, odb_job):
+    fab = altium_outputs(tmp_path / "Outputs", ipc_file, odb_job)
+    s = choose(discover([str(fab)]), None)
+    assert s.primary == "odb" and s.primary_path.endswith("odb") and s.ipc_hints.endswith("board.cvg")
+    assert s.drill and s.drill[0].endswith("NC Drill")
+    assert s.out_dir == str(fab / OUTPUT_DIR)
+    s = choose(discover([str(fab)]), "ipc+drill")
+    assert s.primary == "ipc" and s.ipc_hints is None and s.odb_types is None and s.drill
+    s = choose(discover([str(fab)]), "ipc+odb")
+    assert s.primary == "ipc" and s.odb_types.endswith("odb") and not s.drill
+    with pytest.raises(SystemExit, match="no STEP found"):
+        choose(discover([str(fab)]), "odb+step")
 
 
-def test_same_name_ipc_beside_odb(tmp_path, ipc_file, odb_job):
-    shutil.copy(ipc_file, os.path.join(os.path.dirname(odb_job), "testjob.cvg"))
-    s = choose(discover([odb_job]), None, None)
-    assert s.secondary_ipc and s.secondary_ipc.endswith("testjob.cvg")
+def test_file_brings_its_siblings(tmp_path, ipc_file, odb_job):
+    """A file in an output folder also finds the outputs beside that folder; results go beside the file."""
+    fab = altium_outputs(tmp_path / "FAB", ipc_file, odb_job)
+    s = choose(discover([str(fab / "IPC-2581" / "board.cvg")]), None)
+    assert s.primary == "ipc" and s.odb_types and s.drill                  # the IPC-2581 file given decides
+    assert s.out_dir == str(fab / "IPC-2581" / OUTPUT_DIR)
 
 
-def test_convert_step(tmp_path, ipc_file, capsys):
+def test_flat_folder_and_own_output_skipped(tmp_path, ipc_file):
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    shutil.copy(ipc_file, flat / "board.cvg")
+    (flat / OUTPUT_DIR).mkdir()
+    (flat / OUTPUT_DIR / "board.step").write_text("ISO-10303-21;")       # our own output: never an input
+    s = choose(discover([str(flat)]), None)
+    assert s.primary == "ipc" and s.step is None
+
+
+def test_odb_job_folder_kinds(tmp_path, odb_job):
+    assert kind_of(odb_job) == "odb"
+    wrapped = tmp_path / "ODB-1" / "odb"
+    shutil.copytree(odb_job, wrapped)
+    assert kind_of(str(tmp_path / "ODB-1")) == "folder"
+    s = choose(discover([str(tmp_path / "ODB-1")]), None)              # found below the folder given
+    assert s.primary == "odb" and s.primary_path.endswith("odb")
+
+
+def test_nc_drill_found_and_left_out(tmp_path, ipc_file, odb_job, capsys):
+    fab = altium_outputs(tmp_path / "FAB", ipc_file, odb_job)
+    assert main(["info", str(fab)]) == 0
+    out = capsys.readouterr().out
+    assert "counterbore 2.000 mm from top, depth 0.3000 mm" in out
+    assert main(["info", str(fab), "--sources", "odb+ipc"]) == 0
+    assert "depth 0.3000 mm" not in capsys.readouterr().out
+
+
+def test_convert_step(tmp_path, ipc_file):
     pytest.importorskip("OCP")
     out = tmp_path / "board.step"
     assert main([ipc_file, "-o", str(out), "-q"]) == 0
@@ -54,66 +102,32 @@ def test_convert_step(tmp_path, ipc_file, capsys):
         assert name in text
 
 
-def test_file_inside_fab_folder(tmp_path, ipc_file, odb_job):
-    fab = tmp_path / "FAB"
-    main(["init", str(fab)])
-    shutil.copytree(odb_job, fab / "ODB++" / "testjob")
-    shutil.copy(ipc_file, fab / "IPC2581" / "board.cvg")
-    s = choose(discover([str(fab / "ODB++" / "testjob")]), None, None)
-    assert s.primary == "odb" and s.secondary_ipc.endswith("board.cvg")
-    assert s.config.endswith("config.toml") and s.ncdrill_dirs and s.ncdrill_dirs[0].endswith("NCDRILL")
+def test_default_output_folder(tmp_path, ipc_file):
+    pytest.importorskip("OCP")
+    (tmp_path / "in").mkdir()
+    src = tmp_path / "in" / "board.cvg"
+    shutil.copy(ipc_file, src)
+    assert main([str(src), "-q", "--sanitize"]) == 0
+    assert any(n.endswith("_sanitized-exposed.step") for n in os.listdir(tmp_path / "in" / OUTPUT_DIR))
 
 
-def test_explicit_input_decides(tmp_path, ipc_file, odb_job):
-    # an IPC-2581 file in a folder named like a fab subfolder, next to unrelated ODB++ jobs
-    root = tmp_path / "work"
-    (root / "ipc").mkdir(parents=True)
-    shutil.copy(ipc_file, root / "ipc" / "b.cvg")
-    shutil.copytree(odb_job, root / "other" / "testjob")
-    s = choose(discover([str(root / "ipc" / "b.cvg")]), None, None)
-    assert s.primary == "ipc2581" and s.primary_path.endswith("b.cvg") and s.fab is None
+def test_one_output_per_call(ipc_file):
+    with pytest.raises(SystemExit, match="acts on the board model"):
+        main([ipc_file, "--export", "outline:dxf", "--show", "paste", "-q"])
+    with pytest.raises(SystemExit, match="only with --export"):
+        main([ipc_file, "--no-outline", "-q"])
 
 
-def test_odb_folder_kinds(tmp_path, odb_job):
-    from pcbfab2step.sources import kind_of
-    wrapped = tmp_path / "ODB-1" / "odb"
-    shutil.copytree(odb_job, wrapped)
-    assert kind_of(str(tmp_path / "ODB-1")) == "odb"           # archive extracted with a wrapper folder
-    fab = tmp_path / "FAB"
-    main(["init", str(fab)])
-    shutil.copytree(odb_job, fab / "ODB++", dirs_exist_ok=True)  # job extracted straight into ODB++/
-    assert kind_of(str(fab)) == "folder"
-    s = choose(discover([str(fab)]), None, None)
-    assert s.primary == "odb" and os.path.basename(s.primary_path) == "ODB++"
-
-
-def test_fab_folder_reads_nc_drill(tmp_path, odb_job, capsys):
-    """A fab folder with NC drill output: its .DRR depth is used without --ncdrill."""
-    fab = tmp_path / "FAB"
-    main(["init", str(fab)])
-    shutil.copytree(odb_job, fab / "ODB++" / "testjob")
-    (fab / "NCDRILL" / "testjob.DRR").write_text(
-        "CounterHole : Counterholes Top\nASCII RoundHoles File : testjob.TX2\n\n"
-        "Tool       Hole Size     Hole Tolerance   Hole Type   Hole Count   Plated   Tool Travel     Depth     Angle\n"
-        "T1      2mm (79mil)                       Round       1            NPTH     0mm (0inch)     "
-        "0.3mm (11.811mil)   0\n")
-    (fab / "NCDRILL" / "testjob.TX2").write_text("M48\n;FILE_FORMAT=4:4\nMETRIC,LZ\nT01F00S00C2.0000\n%\nT01\n"
-                                                 "X0010Y0010\nM30\n")
-    assert main(["info", str(fab)]) == 0
+def test_settings_from_the_command_line(ipc_file, capsys):
+    assert main(["info", ipc_file, "--thickness", "mask=1mil,TOP=0.07", "--color", "mask=black",
+                 "--set", "finish.type=ENIG", "--hide", "silk"]) == 0
     out = capsys.readouterr().out
-    assert "NCDRILL/ of the fab folder read" in out and "counterbore 2.000 mm from top, depth 0.3000 mm" in out
-    assert main(["info", str(fab), "--no-ncdrill"]) == 0
+    assert "0.0254" in out or "25.4 um" in out
+    with pytest.raises(SystemExit, match="did you mean"):
+        main(["info", ipc_file, "--set", "soldermask.colour=black"])
+
+
+def test_settings_command(capsys):
+    assert main(["settings"]) == 0
     out = capsys.readouterr().out
-    assert "of the fab folder read" not in out and "depth 0.3000 mm" not in out
-
-
-def test_altium_output_folder_names(tmp_path, ipc_file, odb_job):
-    """Altium OutJob folders: 'ODB++/odb' (extracted job), 'IPC-2581', 'NC Drill'."""
-    fab = tmp_path / "Outputs"
-    shutil.copytree(odb_job, fab / "ODB++" / "odb")
-    (fab / "IPC-2581").mkdir()
-    shutil.copy(ipc_file, fab / "IPC-2581" / "board.cvg")
-    (fab / "NC Drill").mkdir()
-    s = choose(discover([str(fab)]), None, None)
-    assert s.primary == "odb" and s.primary_path.endswith("odb") and s.secondary_ipc.endswith("board.cvg")
-    assert s.ncdrill_dirs and s.ncdrill_dirs[0].endswith("NC Drill")
+    assert "[export]" in out and "stencil_thickness" in out and "[model]" in out

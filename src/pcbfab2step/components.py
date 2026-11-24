@@ -17,6 +17,7 @@ the top surface.
 from __future__ import annotations
 
 import os
+import re
 from typing import List, Optional, Tuple
 
 from .common import info, warn
@@ -58,9 +59,9 @@ def _bbox(o, shape) -> Optional[Tuple[float, ...]]:
     return (p0.X(), p0.Y(), p0.Z(), p1.X(), p1.Y(), p1.Z())
 
 
-def read(path: str, outline_bounds, z_top: float, z_bot: float) -> Tuple[List[dict], List[str]]:
-    """-> (components for write_step, report notes). z_top/z_bot: the model's
-    outer surfaces (mask included)."""
+def read(path: str, outline_bounds, z_top: float, z_bot: float) -> List[dict]:
+    """-> bodies for write_step, grouped Components top/bottom > part > body.
+    z_top/z_bot: the model's outer surfaces (solder mask included)."""
     o = _occ()
     doc = o["TDocStd_Document"](o["TCollection_ExtendedString"]("XmlOcaf"))
     r = o["STEPCAFControl_Reader"]()
@@ -68,7 +69,7 @@ def read(path: str, outline_bounds, z_top: float, z_bot: float) -> Tuple[List[di
     r.SetColorMode(True)
     if r.ReadFile(path) != o["IFSelect_ReturnStatus"].IFSelect_RetDone or not r.Transfer(doc):
         warn(f"components: cannot read {path}")
-        return [], []
+        return []
     st = o["XCAFDoc_DocumentTool"].ShapeTool_s(doc.Main())
     ct = o["XCAFDoc_DocumentTool"].ColorTool_s(doc.Main())
     Seq, Label = o["Seq"], o["TDF_Label"]
@@ -92,24 +93,23 @@ def read(path: str, outline_bounds, z_top: float, z_bot: float) -> Tuple[List[di
                     return (c.Red(), c.Green(), c.Blue())
         return inherited
 
-    def leaves(lab, loc, inh, path_name, out):
-        """(name, located shape, colour) of every part below an assembly label."""
+    def leaves(lab, loc, inh, out):
+        """(product name, located shape, colour) of every body below a label."""
         ref = Label()
+        nm = name(lab)
         if st.IsReference_s(lab) and st.GetReferredShape_s(lab, ref):
             loc = loc.Multiplied(st.GetLocation_s(lab))
             inh = color(lab, inh)
-            nm = name(lab) or name(ref)
+            nm = name(ref) or nm               # the product's name (body), not the instance's (body:1)
             lab = ref
-        else:
-            nm = name(lab)
         inh = color(lab, inh)
         if st.IsAssembly_s(lab):
             kids = Seq()
             st.GetComponents_s(lab, kids)
             for i in range(1, kids.Length() + 1):
-                leaves(kids.Value(i), loc, inh, path_name + [nm] if nm else path_name, out)
+                leaves(kids.Value(i), loc, inh, out)
         else:
-            out.append((" / ".join(path_name + [nm or "body"]), st.GetShape_s(lab).Moved(loc), inh))
+            out.append((re.sub(r":\d+$", "", nm) or "body", st.GetShape_s(lab).Moved(loc), inh))
 
     free = Seq()
     st.GetFreeShapes(free)
@@ -168,19 +168,22 @@ def read(path: str, outline_bounds, z_top: float, z_bot: float) -> Tuple[List[di
         tr = o["gp_Trsf"]()
         tr.SetTranslation(o["gp_Vec"](dx, dy, dz))
         out = []
-        leaves(lab, TopLoc(), GREY, [], out)
-        by_col = {}
+        leaves(lab, TopLoc(), GREY, out)
+        group = "Components top" if side == "top" else "Components bottom"
+        layer = f"COMPONENTS_{side.upper()}"
+        if len(out) == 1:
+            _, shape, col = out[0]
+            comps.append({"name": nm, "color": col, "solids": [shape.Moved(TopLoc(tr))], "layer": layer,
+                          "path": (group,)})
+            continue
+        used = {}
         for sub, shape, col in out:
-            g = by_col.setdefault(tuple(round(c, 4) for c in col), ([], []))
-            g[0].append(shape.Moved(TopLoc(tr)))
-            leaf = sub.split(" / ")[-1]
-            if leaf not in g[1]:
-                g[1].append(leaf)
-        for col, (shapes, subs) in by_col.items():
-            label = nm + (f": {', '.join(subs)}" if len(by_col) > 1 else "")
-            comps.append({"name": label, "color": col, "solids": shapes, "layer": f"COMPONENTS_{side.upper()}"})
+            used[sub] = used.get(sub, 0) + 1
+            leaf = sub if used[sub] == 1 else f"{sub} {used[sub]}"
+            comps.append({"name": leaf, "color": col, "solids": [shape.Moved(TopLoc(tr))], "layer": layer,
+                          "path": (group, nm)})
     notes.insert(0, f"{len(parts) - (board is not None)} part(s) from {os.path.basename(path)}: "
                     f"{sides['top']} on top, {sides['bottom']} on the bottom")
     for n in notes:
-        info("  components: " + n)
-    return comps, notes
+        info("  " + n)
+    return comps

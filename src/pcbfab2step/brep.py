@@ -819,8 +819,9 @@ def write_step(path: str, root_name: str, components, schema: str = "AP214", fmt
     st = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
     ct = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
     lt = XCAFDoc_DocumentTool.LayerTool_s(doc.Main())
-    asm = st.NewShape()
-    TDataStd_Name.Set_s(asm, TCollection_ExtendedString(root_name))
+    # bodies with a "path" go into nested assemblies (PCB, Components bottom > R1 > body ...);
+    # the tree is built leaves first, then each assembly is added to its parent
+    kids = {(): []}
     for comp in components:
         if not comp["solids"]:
             continue
@@ -834,9 +835,23 @@ def write_step(path: str, root_name: str, components, schema: str = "AP214", fmt
         r, g, b = comp["color"]
         ct.SetColor(lab, Quantity_Color(r, g, b, Quantity_TypeOfColor.Quantity_TOC_sRGB),
                     XCAFDoc_ColorType.XCAFDoc_ColorSurf)
-        st.AddComponent(asm, lab, TopLoc_Location())
         if comp.get("layer"):
             lt.SetLayer(lab, TCollection_ExtendedString(comp["layer"]))
+        grp = tuple(comp.get("path") or ())
+        for i in range(len(grp) + 1):
+            kids.setdefault(grp[:i], [])
+            if i and grp[:i] not in kids[grp[:i - 1]]:
+                kids[grp[:i - 1]].append(grp[:i])
+        kids[grp].append(lab)
+
+    def assemble(grp):
+        asm = st.NewShape()
+        TDataStd_Name.Set_s(asm, TCollection_ExtendedString(grp[-1] if grp else root_name))
+        for k in kids[grp]:
+            child = assemble(k) if isinstance(k, tuple) else k
+            st.AddComponent(asm, child, TopLoc_Location())
+        return asm
+    assemble(())
     st.UpdateAssemblies()
     from OCP.STEPControl import STEPControl_Controller
     STEPControl_Controller.Init_s()     # registers the write.step.* parameters

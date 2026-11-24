@@ -1,11 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Albert van Zyl
 
-"""Input discovery: what was given on the command line (files, a fab folder,
-a plain folder) -> the primary source, the secondary sources and the config
-file. Nothing is hard-coded to one layout: a single ODB++ archive or IPC-2581
-file always works, and a folder is searched in its standard subfolders
-(ODB++/, IPC2581/, NCDRILL/, GERBER/) and in itself."""
+"""Input discovery: the paths given on the command line -> the fab outputs
+to read and where the results go.
+
+No layout is assumed. A folder is searched with its subfolders; a file brings
+the other outputs in its folder, and in the parent folder when its folder is
+one of the usual output folders (ODB++, IPC-2581, NC Drill, Gerber, STEP),
+so FAB/IPC-2581/board.cvg also finds FAB/STEP/board.step. Found are:
+
+    odb      ODB++ product model (job folder or .tgz/.tar/.zip)
+    ipc      IPC-2581 file (.cvg/.xml, also zipped)
+    drill    NC drill output (.DRR report and its drill files)
+    gerber   Gerber files (found, not read yet)
+    step     the ECAD's STEP export, whose components are added
+
+The first geometry source (ODB++ before IPC-2581) gives the board; the others
+add what it lacks. Results go to PCBFab2Step/ in the folder given, or in the
+folder of the file given; that folder is never searched.
+"""
 
 from __future__ import annotations
 
@@ -19,34 +32,47 @@ from typing import Dict, List, Optional
 from .config import CONFIG_NAME
 from .ipc2581 import is_ipc2581
 
+OUTPUT_DIR = "PCBFab2Step"
 ODB_ARCHIVES = (".tgz", ".tar.gz", ".tar", ".zip", ".gz")
 IPC_FILES = (".cvg", ".xml")
-SUBDIRS: Dict[str, tuple] = {
-    "odb": ("odb++", "odb", "odbpp", "odb_pp"),
-    "ipc2581": ("ipc2581", "ipc-2581", "ipc_2581", "ipc"),
-    "ncdrill": ("ncdrill", "nc_drill", "nc-drill", "nc drill", "nc", "drill"),
-    "gerber": ("gerber", "gerbers"),
-    "step": ("step", "3d", "mcad"),                   # Altium's STEP export: its components are added
-    "export": ("export", "exports"),                  # our own output
-}
-ALL_SUBDIRS = {n for v in SUBDIRS.values() for n in v}
-LABEL = {"odb": "ODB++", "ipc2581": "IPC-2581"}
+STEP_FILES = (".step", ".stp")
+GERBER_FILES = (".gbr", ".ger", ".gtl", ".gbl", ".gts", ".gbs", ".gto", ".gbo", ".gtp", ".gbp", ".gko", ".gm1",
+                ".gml", ".pho", ".art")
+# folders an ECAD writes its outputs to: a file in one of them brings its siblings too
+OUTPUT_FOLDERS = {"odb++", "odb", "odbpp", "odb_pp", "ipc2581", "ipc-2581", "ipc_2581", "ipc", "ncdrill", "nc drill",
+                  "nc_drill", "nc-drill", "nc", "drill", "gerber", "gerbers", "step", "3d", "mcad"}
+SKIP = {OUTPUT_DIR.lower(), "export", "exports", "history", "__previews", "__pycache__", ".git", ".svn", ".venv",
+        "venv", "node_modules"}
+KINDS = ("odb", "ipc", "gerber", "drill", "step")
+GEOMETRY = ("odb", "ipc", "gerber")
+ALIASES = {"odb": "odb", "odb++": "odb", "odbpp": "odb", "ipc": "ipc", "ipc2581": "ipc", "ipc-2581": "ipc",
+           "gerber": "gerber", "gerbers": "gerber", "drill": "drill", "ncdrill": "drill", "nc": "drill",
+           "nc-drill": "drill", "step": "step", "components": "step"}
+LABEL = {"odb": "ODB++", "ipc": "IPC-2581", "gerber": "Gerber", "drill": "NC drill", "step": "STEP"}
+MAX_DEPTH = 4
 
 
 @dataclass
 class Sources:
-    odb: List[str] = field(default_factory=list)       # ODB++ candidates
-    ipc: List[str] = field(default_factory=list)       # IPC-2581 candidates
-    explicit: Dict[str, List[str]] = field(default_factory=dict)
-    fab: Optional[str] = None                          # fab folder
+    found: Dict[str, List[str]] = field(default_factory=lambda: {k: [] for k in KINDS})
+    explicit: Dict[str, List[str]] = field(default_factory=lambda: {k: [] for k in KINDS})
+    roots: List[str] = field(default_factory=list)
+    out_dir: str = ""
     config: Optional[str] = None
-    ncdrill_dirs: List[str] = field(default_factory=list)
-    gerber: bool = False
-    step_files: List[str] = field(default_factory=list)   # ECAD STEP exports (STEP/), newest first
     notes: List[str] = field(default_factory=list)
+    # chosen
+    use: List[str] = field(default_factory=list)
     primary: str = ""
     primary_path: str = ""
-    secondary_ipc: Optional[str] = None
+    ipc_hints: Optional[str] = None        # IPC-2581 next to an ODB++ primary: counterhole types
+    odb_types: Optional[str] = None        # ODB++ next to an IPC-2581 primary: via types
+    drill: List[str] = field(default_factory=list)
+    step: Optional[str] = None
+
+
+# --------------------------------------------------------------------------
+# classification
+# --------------------------------------------------------------------------
 
 
 def _zip_kind(path: str) -> Optional[str]:
@@ -61,7 +87,7 @@ def _zip_kind(path: str) -> Optional[str]:
         return "odb"
     ipcs = [n for n in names if n.endswith(IPC_FILES)]
     if len(ipcs) == 1 and is_ipc2581(path):
-        return "ipc2581"
+        return "ipc"
     return None
 
 
@@ -81,37 +107,23 @@ def _is_odb_root(p: str) -> bool:
     return os.path.isfile(os.path.join(p, "matrix", "matrix"))
 
 
-def _odb_job_dir(p: str) -> bool:
-    """p holds an ODB++ job: matrix/matrix in it, or in its only subfolder
-    (an extracted archive with a wrapper folder such as 'odb')."""
-    if _is_odb_root(p):
-        return True
-    try:
-        kids = [os.path.join(p, k) for k in os.listdir(p) if os.path.isdir(os.path.join(p, k))]
-    except OSError:
-        return False
-    return len(kids) == 1 and _is_odb_root(kids[0])
-
-
 def kind_of(path: str) -> Optional[str]:
-    """odb, ipc2581, ncdrill, config, folder or None."""
+    """odb, ipc, drill, gerber, step, config, folder, or None."""
     if os.path.isdir(path):
-        if _is_odb_root(path):
-            return "odb"
-        if os.path.isfile(os.path.join(path, CONFIG_NAME)):
-            return "folder"
-        if _odb_job_dir(path) and not any(_subdir(path, k) for k in ("ipc2581", "ncdrill", "gerber")):
-            return "odb"
-        return "folder"
+        return "odb" if _is_odb_root(path) else "folder"
     if not os.path.isfile(path):
         return None
     low = path.lower()
     if low.endswith(".toml"):
         return "config"
     if low.endswith(".drr"):
-        return "ncdrill"
+        return "drill"
+    if low.endswith(STEP_FILES):
+        return "step"
+    if low.endswith(GERBER_FILES):
+        return "gerber"
     if low.endswith(IPC_FILES):
-        return "ipc2581" if is_ipc2581(path) else None
+        return "ipc" if is_ipc2581(path) else None
     if low.endswith(".zip"):
         return _zip_kind(path)
     if low.endswith(ODB_ARCHIVES):
@@ -119,181 +131,183 @@ def kind_of(path: str) -> Optional[str]:
     return None
 
 
-def _subdir(folder: str, kind: str) -> Optional[str]:
+def _ours(path: str) -> bool:
+    """A STEP written by pcbfab2step (never an input)."""
     try:
-        entries = os.listdir(folder)
+        with open(path, "rb") as f:
+            return b"by pcbfab2step" in f.read(4096)
     except OSError:
-        return None
-    for e in entries:
-        if e.lower() in SUBDIRS[kind] and os.path.isdir(os.path.join(folder, e)):
-            return os.path.join(folder, e)
-    return None
+        return False
 
 
-def _scan(folder: str, kind: str, inner: bool = False) -> List[str]:
-    """Inputs of one kind directly in a folder (inner: the folder is the fab
-    folder's subfolder for that kind, where an extracted job may be called 'odb')."""
-    out = []
-    try:
-        entries = sorted(os.listdir(folder))
-    except OSError:
-        return out
-    for e in entries:
-        p = os.path.join(folder, e)
-        if os.path.isdir(p):
-            # fab subfolders are searched on their own
-            if kind == "odb" and (inner or e.lower() not in ALL_SUBDIRS) and _odb_job_dir(p):
-                out.append(p)
+def _walk(root: str, found: Dict[str, List[str]]):
+    """Everything below root (MAX_DEPTH levels), our own output folder skipped."""
+    root = os.path.abspath(root)
+    base = root.rstrip(os.sep).count(os.sep)
+    for dirpath, dirnames, filenames in os.walk(root):
+        if _is_odb_root(dirpath):
+            found["odb"].append(dirpath)
+            dirnames[:] = []
             continue
-        low = e.lower()
-        if kind == "odb" and low.endswith(ODB_ARCHIVES) and kind_of(p) == "odb":
-            out.append(p)
-        elif kind == "ipc2581" and (low.endswith(IPC_FILES) or low.endswith(".zip")) and kind_of(p) == "ipc2581":
-            out.append(p)
-    return out
-
-
-def _config_near(path: str) -> Optional[str]:
-    """config.toml of the fab folder an input file sits in (the folder itself,
-    or its parent when the file sits in a standard subfolder)."""
-    d = os.path.dirname(os.path.abspath(path))
-    c = os.path.join(d, CONFIG_NAME)
-    if os.path.isfile(c):
-        return c
-    if os.path.basename(d).lower() in ALL_SUBDIRS:
-        c = os.path.join(os.path.dirname(d), CONFIG_NAME)
-        if os.path.isfile(c):
-            return c
-    return None
+        if dirpath.count(os.sep) - base >= MAX_DEPTH:
+            dirnames[:] = []
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP and not d.startswith("."))
+        drr = False
+        for f in sorted(filenames):
+            p = os.path.join(dirpath, f)
+            low = f.lower()
+            if low.endswith(".drr"):
+                drr = True
+            elif low.endswith(STEP_FILES):
+                if not _ours(p):
+                    found["step"].append(p)
+            elif low.endswith(GERBER_FILES):
+                found["gerber"].append(p)
+            elif low.endswith(IPC_FILES + ODB_ARCHIVES):
+                k = kind_of(p)
+                if k in ("odb", "ipc"):
+                    found[k].append(p)
+        if drr:
+            found["drill"].append(dirpath)
 
 
 def discover(inputs: List[str], config: Optional[str] = None, no_config: bool = False) -> Sources:
-    """Classify the inputs, find the fab folder and the config file."""
-    s = Sources(explicit={"odb": [], "ipc2581": [], "ncdrill": []})
-    folders = []
+    s = Sources()
+    inputs = inputs or ["."]
     for p in inputs:
         k = kind_of(p)
         if k is None:
             if not os.path.exists(p):
                 raise SystemExit(f"input '{p}' not found")
-            raise SystemExit(f"input '{p}': not an ODB++ product model, IPC-2581 file, fab folder or config.toml")
-        if k == "folder":
-            folders.append(p)
-        elif k == "config":
-            s.config = s.config or p
-            folders.append(os.path.dirname(os.path.abspath(p)))
+            raise SystemExit(f"input '{p}': not fab data (ODB++, IPC-2581, NC drill report, STEP, config.toml) "
+                             "or a folder")
+        ap = os.path.abspath(p)
+        if k == "config":
+            config = config or ap
+            continue
+        if k == "folder" or (k == "odb" and os.path.isdir(ap)):
+            if k == "odb":
+                s.explicit["odb"].append(ap)
+            root = ap
         else:
-            s.explicit[k].append(p)
-    if len(folders) > 1:
-        raise SystemExit("give one fab folder (or files)")
-    if not folders:
-        # a file inside a fab folder's subfolder (FAB/ODB++/board.tgz): use that fab folder too
-        first = (s.explicit["odb"] + s.explicit["ipc2581"])[:1]
-        if first:
-            d = os.path.dirname(os.path.abspath(first[0].rstrip("/\\")))
-            parent = os.path.dirname(d)
-            if os.path.basename(d).lower() in ALL_SUBDIRS and os.path.isfile(os.path.join(parent, CONFIG_NAME)):
-                folders.append(parent)
-    if folders:
-        f = folders[0]
-        s.fab = f
-        for kind in ("odb", "ipc2581"):
-            sub = _subdir(f, kind)
-            if sub and kind == "odb" and _is_odb_root(sub):
-                found = [sub]                     # job extracted straight into ODB++/
-            else:
-                found = (_scan(sub, kind, inner=True) if sub else []) + _scan(f, kind)
-            if kind == "odb":
-                s.odb = found
-            else:
-                s.ipc = found
-        nd = _subdir(f, "ncdrill")
-        if nd:
-            s.ncdrill_dirs.append(nd)
-        gd = _subdir(f, "gerber")
-        s.gerber = bool(gd and os.listdir(gd))
-        sd = _subdir(f, "step")
-        if sd:
-            s.step_files = sorted((os.path.join(sd, e) for e in os.listdir(sd)
-                                   if e.lower().endswith((".step", ".stp"))), key=os.path.getmtime, reverse=True)
-        if s.config is None and os.path.isfile(os.path.join(f, CONFIG_NAME)):
-            s.config = os.path.join(f, CONFIG_NAME)
-    s.odb = s.explicit["odb"] + [p for p in s.odb if p not in s.explicit["odb"]]
-    s.ipc = s.explicit["ipc2581"] + [p for p in s.ipc if p not in s.explicit["ipc2581"]]
-    if s.config is None and not folders:
-        first = (s.explicit["odb"] + s.explicit["ipc2581"])[:1]
-        if first:
-            s.config = _config_near(first[0])
-    if config:
-        s.config = config
-    if no_config:
-        s.config = None
+            s.explicit[k].append(ap if k != "drill" else ap)
+            root = os.path.dirname(ap)
+        if not s.out_dir:
+            s.out_dir = os.path.join(root if (k == "folder" or not os.path.isdir(ap)) else os.path.dirname(ap),
+                                     OUTPUT_DIR)
+        if os.path.basename(root).lower() in OUTPUT_FOLDERS:
+            root = os.path.dirname(root)              # the usual output folders: their siblings count
+        if root not in s.roots:
+            s.roots.append(root)
+    for r in s.roots:
+        _walk(r, s.found)
+    for k in KINDS:
+        seen, lst = set(), []
+        for p in s.explicit[k] + s.found[k]:
+            if p not in seen:
+                seen.add(p)
+                lst.append(p)
+        s.found[k] = lst
+    if not no_config:
+        if config:
+            s.config = config
+        else:
+            for r in s.roots:
+                c = os.path.join(r, CONFIG_NAME)
+                if os.path.isfile(c):
+                    s.config = c
+                    break
     return s
 
 
-def _newest(paths: List[str]) -> str:
-    return max(paths, key=lambda p: os.path.getmtime(p))
+# --------------------------------------------------------------------------
+# choice
+# --------------------------------------------------------------------------
 
 
-def choose(s: Sources, want: Optional[str], ipc_opt: Optional[str]) -> Sources:
-    """Pick the primary source (want: odb / ipc2581 / None) and the IPC-2581
-    file used as secondary data next to ODB++ (ipc_opt: a path, 'off' or None
-    for automatic)."""
-    if want == "odb" and not s.odb:
-        raise SystemExit("--source odb: no ODB++ input found" + (f" in {s.fab}" if s.fab else ""))
-    if want == "ipc2581" and not s.ipc:
-        raise SystemExit("--source ipc2581: no IPC-2581 input found" + (f" in {s.fab}" if s.fab else ""))
-    # explicit inputs decide before anything found in folders
-    ex_odb, ex_ipc = s.explicit["odb"], s.explicit["ipc2581"]
-    if want:
-        kind = want
-    elif ex_odb or ex_ipc:
-        kind = "odb" if ex_odb else "ipc2581"
-    else:
-        kind = "odb" if s.odb else "ipc2581" if s.ipc else None
-    if kind is None:
-        where = f" in {s.fab}" if s.fab else ""
-        if s.gerber:
-            raise SystemExit(f"only Gerber data{where}: Gerber input is not supported yet (use ODB++ or IPC-2581)")
-        raise SystemExit(f"no ODB++ or IPC-2581 input found{where}")
-    cands = s.odb if kind == "odb" else s.ipc
-    explicit = s.explicit["odb" if kind == "odb" else "ipc2581"]
-    if len(explicit) > 1:
-        raise SystemExit(f"several {LABEL[kind]} inputs given: give one")
-    if explicit:
-        s.primary_path = explicit[0]
-    elif len(cands) > 1:
-        s.primary_path = _newest(cands)
-        s.notes.append(f"{len(cands)} {LABEL[kind]} inputs found; using the newest, "
-                       f"{os.path.basename(s.primary_path)}")
-    else:
-        s.primary_path = cands[0]
-    s.primary = kind
-    if kind == "odb":
-        if ipc_opt and ipc_opt.lower() in ("off", "none", "no"):
-            return s
-        if ipc_opt:
-            if kind_of(ipc_opt) != "ipc2581":
-                raise SystemExit(f"--ipc2581 '{ipc_opt}': not an IPC-2581 file")
-            s.secondary_ipc = ipc_opt
-        elif s.explicit["ipc2581"]:
-            s.secondary_ipc = s.explicit["ipc2581"][0]
-        elif s.fab and s.ipc:
-            s.secondary_ipc = _newest(s.ipc) if len(s.ipc) > 1 else s.ipc[0]
-        else:
-            stem = _stem(s.primary_path)
-            folder = os.path.dirname(os.path.abspath(s.primary_path))
-            same = [p for p in _scan(folder, "ipc2581") if _stem(p) == stem]
-            if same:
-                s.secondary_ipc = same[0]
-                s.notes.append(f"IPC-2581 {os.path.basename(same[0])} found beside the ODB++ input (same name); "
-                               "--ipc2581 off to leave it out")
-    return s
+def parse_use(spec: Optional[str]) -> Optional[List[str]]:
+    """'odb+drill+step' / 'ipc,step' -> kinds in order; None or 'auto' -> None."""
+    if spec is None or str(spec).strip().lower() in ("", "auto", "all", "default"):
+        return None
+    out = []
+    for t in re.split(r"[+,\s]+", str(spec).strip().lower()):
+        if not t:
+            continue
+        if t not in ALIASES:
+            raise SystemExit(f"--sources: unknown source '{t}' (odb, ipc, gerber, drill, step)")
+        if ALIASES[t] not in out:
+            out.append(ALIASES[t])
+    return out
 
 
 def _stem(path: str) -> str:
     base = os.path.basename(os.path.normpath(path)).lower()
-    for ext in (".tar.gz",) + ODB_ARCHIVES + IPC_FILES:
+    for ext in (".tar.gz",) + ODB_ARCHIVES + IPC_FILES + STEP_FILES:
         if base.endswith(ext):
             return base[: -len(ext)]
     return os.path.splitext(base)[0]
+
+
+def _pick(s: Sources, kind: str, stem: str = "") -> Optional[str]:
+    """One input of a kind: the one given, else the only one found, else the
+    one named like the primary (stem), else for the primary the newest;
+    ODB++ prefers the extracted job folder to its archives. With several
+    candidates none named like the board, a secondary source is not used."""
+    if s.explicit[kind]:
+        if len(s.explicit[kind]) > 1 and kind in GEOMETRY + ("step",):
+            raise SystemExit(f"several {LABEL[kind]} inputs given: give one")
+        return s.explicit[kind][0]
+    cands = s.found[kind]
+    if len(cands) == 1:
+        return cands[0]
+    pool = cands
+    if stem:
+        same = [p for p in cands if _stem(p) == stem]
+        if not same:
+            s.notes.append(f"{len(cands)} {LABEL[kind]} files found, none named like the board ({stem}); "
+                           f"not used (give one as an input)")
+            return None
+        pool = same
+    if kind == "odb":
+        folders = [p for p in pool if os.path.isdir(p)]
+        pool = folders or pool
+    pick = max(pool, key=lambda p: os.path.getmtime(p))
+    s.notes.append(f"{len(cands)} {LABEL[kind]} inputs found; using {os.path.relpath(pick, s.roots[0])}")
+    return pick
+
+
+def choose(s: Sources, use_spec: Optional[str]) -> Sources:
+    want = parse_use(use_spec)
+    where = f" in {s.roots[0]}" if s.roots else ""
+    if want is None:
+        s.use = [k for k in KINDS if s.found[k] and k != "gerber"]
+        geo = [k for k in GEOMETRY if s.found[k]]
+        # a geometry file given explicitly decides the primary
+        exp = [k for k in GEOMETRY if s.explicit[k]]
+        primary = exp[0] if exp else (geo[0] if geo else None)
+    else:
+        for k in want:
+            if not s.found[k]:
+                raise SystemExit(f"--sources {k}: no {LABEL[k]} found{where}")
+        s.use = want
+        primary = next((k for k in want if k in GEOMETRY), None)
+    if primary is None:
+        if s.found["gerber"]:
+            raise SystemExit(f"only Gerber data{where}: reading Gerber is not supported yet (use ODB++ or IPC-2581)")
+        raise SystemExit(f"no ODB++ or IPC-2581 found{where}")
+    if primary == "gerber":
+        raise SystemExit("--sources gerber: reading Gerber is not supported yet (use ODB++ or IPC-2581)")
+    s.primary = primary
+    s.primary_path = _pick(s, primary)
+    stem = _stem(s.primary_path)
+    if primary == "odb" and "ipc" in s.use:
+        s.ipc_hints = _pick(s, "ipc", stem)
+    if primary == "ipc" and "odb" in s.use:
+        s.odb_types = _pick(s, "odb", stem)
+    if "drill" in s.use:
+        s.drill = list(s.found["drill"])
+    if "step" in s.use:
+        s.step = _pick(s, "step", stem)
+    if s.found["gerber"] and "gerber" not in s.use:
+        s.notes.append(f"{len(s.found['gerber'])} Gerber file(s) found; not read (Gerber is not supported yet)")
+    return s
