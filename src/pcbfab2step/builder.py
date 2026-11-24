@@ -310,6 +310,7 @@ class Model:
         self._unaligned = set()
         self._tent_region: Dict[str, object] = {}
         self.vias_drilled = True
+        self.geo = Brep          # solids; scene.MeshGeo builds viewer meshes from the same regions instead
 
     # .. images ...............................................................
     def image(self, L: Layer):
@@ -1171,7 +1172,7 @@ class Model:
             reg = clean(gdiff(base, self._cut_union(act, cache)))
             if label and a == merged[0]:
                 self.svg[label] = reg
-            out.extend(Brep.prisms(reg, a, b))
+            out.extend(self.geo.prisms(reg, a, b))
         return out
 
     def _coat_cuts(self, side):
@@ -1292,12 +1293,16 @@ class Model:
                 left_open.append(h)
         return union_all(out), left_open, len(out), "via openings by shape: round, around one via, no paste"
 
-    def _comp(self, name, color, solids, layer=None):
+    def _comp(self, name, color, solids, layer=None, kind=""):
         if solids:
-            self.components.append(dict(name=name, color=color, solids=solids, layer=layer or name))
+            self.components.append(dict(name=name, color=color, solids=solids, layer=layer or name, kind=kind))
 
     def build(self):
-        OCC.load()
+        exact = self.geo is Brep
+        if exact:
+            OCC.load()
+        elif self.cones:
+            self._cone_steps()
         o = self.opts
         st = self.stk.stack
         n = len(st)
@@ -1314,7 +1319,7 @@ class Model:
             # outer copper only; everything between is one core body, like Altium's STEP
             z0, z1 = st[-1].z1, st[0].z0
             core = self.slab(self.B, z0, z1, cache, label="dielectric_core")
-            self._comp(f"Core ({z1 - z0:.4f} mm, inner layers merged)", o.board_color, core, "CORE")
+            self._comp(f"Core ({z1 - z0:.4f} mm, inner layers merged)", o.board_color, core, "CORE", "core")
         for i, L in enumerate(st):
             if ext and n > 2 and 0 < i < n - 1:
                 continue
@@ -1335,7 +1340,7 @@ class Model:
                 solids = solids + diel_extra[i]
             if L.kind == "copper":
                 name = f"{L.name} (copper {L.t * 1000:.1f} um)"
-                self._comp(name, o.copper_color, solids, L.name)
+                self._comp(name, o.copper_color, solids, L.name, "copper")
             else:
                 bits = [b for b in (L.material, L.dielectric_type.lower() if L.dielectric_type else "") if b]
                 bits.append(f"{L.t:.4f} mm")
@@ -1343,13 +1348,27 @@ class Model:
                     bits.append(f"Dk {L.dk:g}")
                 if L.df:
                     bits.append(f"Df {L.df:g}")
-                self._comp(f"{L.name} ({', '.join(bits)})", o.board_color, solids, L.name)
+                self._comp(f"{L.name} ({', '.join(bits)})", o.board_color, solids, L.name, "dielectric")
         info(f"  stackup bodies built ({time.time() - t0:.1f} s)", 2)
         for side in ("top", "bottom"):
             self._build_coatings(side, cu_img, cache)
         self._build_hole_bodies()
-        if self.cones:
+        if self.cones and exact:
             self._apply_cones()
+
+    CONE_STEPS = 8
+
+    def _cone_steps(self):
+        """Meshes for the viewer: a countersink as a stack of discs (the exact
+        cone is cut from the solids)."""
+        for cn in self.cones:
+            n = self.CONE_STEPS
+            for k in range(n):
+                za = cn.z_wide + (cn.z_narrow - cn.z_wide) * k / n
+                zb = cn.z_wide + (cn.z_narrow - cn.z_wide) * (k + 1) / n
+                r = cn.r_wide + (cn.r_narrow - cn.r_wide) * (k + 0.5) / n
+                self.cuts.append(Cut(circle(cn.x, cn.y, r), min(za, zb), max(za, zb), "cone", False, False,
+                                     cid=len(self.cuts)))
 
     def _fill_target(self, i):
         st = self.stk.stack
@@ -1396,11 +1415,11 @@ class Model:
             self.svg[f"mask_{side}"] = upper
             solids = []
             if cu is not None:
-                solids += Brep.prisms(lower, *zr(z_lam, z_cu))
-            solids += Brep.prisms(upper, *zr(z_cu, z_cu + sg * t_m))
+                solids += self.geo.prisms(lower, *zr(z_lam, z_cu))
+            solids += self.geo.prisms(upper, *zr(z_cu, z_cu + sg * t_m))
             L0 = masks[0]
             nm = f"{L0.name} (solder mask {t_m * 1000:.1f} um" + (f", Dk {L0.dk:g}" if L0.dk else "") + ")"
-            self._comp(nm, o.mask_color, solids, L0.name)
+            self._comp(nm, o.mask_color, solids, L0.name, "mask")
             z_mask_top = z_cu + sg * t_m
         else:
             z_mask_top = None
@@ -1424,9 +1443,9 @@ class Model:
         if t_f > 0 and not F.is_empty:
             F = clean(gdiff(gdiff(F, holes_open), pierce))
             self.svg[f"finish_{side}"] = F
-            solids = Brep.prisms(F, *zr(z_cu, z_cu + sg * t_f))
+            solids = self.geo.prisms(F, *zr(z_cu, z_cu + sg * t_f))
             nm = f"{fin_name} (surface finish{', ' + fin_mat if fin_mat else ''}, {t_f * 1000:.2f} um)"
-            self._comp(nm, self._finish_color(fin_mat), solids, fin_name)
+            self._comp(nm, self._finish_color(fin_mat), solids, fin_name, "finish")
         # silkscreen
         silks = coats.get("silk", []) if not o.no_silk else []
         if silks:
@@ -1438,24 +1457,26 @@ class Model:
                 if not o.no_clip_silk:
                     S = ginter(S, M)
                 S = clean(S)
-                solids = Brep.prisms(S, *zr(z_mask_top, z_mask_top + sg * t_s))
+                solids = self.geo.prisms(S, *zr(z_mask_top, z_mask_top + sg * t_s))
             else:
                 S = clean(gdiff(S, holes))
                 lower = clean(gdiff(S, C))
                 upper = clean(gdiff(S, F)) if t_f > 0 else S
                 if cu is not None:
-                    solids += Brep.prisms(lower, *zr(z_lam, z_cu))
-                solids += Brep.prisms(upper, *zr(z_cu, z_cu + sg * t_s))
+                    solids += self.geo.prisms(lower, *zr(z_lam, z_cu))
+                solids += self.geo.prisms(upper, *zr(z_cu, z_cu + sg * t_s))
             self.svg[f"silk_{side}"] = S
-            self._comp(f"{silks[0].name} (silkscreen {t_s * 1000:.1f} um)", o.silk_color, solids, silks[0].name)
+            self._comp(f"{silks[0].name} (silkscreen {t_s * 1000:.1f} um)", o.silk_color, solids, silks[0].name,
+                       "silk")
         # solder paste
         pastes = coats.get("paste", []) if o.paste else []
         if pastes:
             P = clean(gdiff(union_all(self.image(L) for L in pastes), holes_open))
             t_p = max(L.t for L in pastes)
             z0 = z_cu + sg * t_f
-            solids = Brep.prisms(P, *zr(z0, z0 + sg * t_p))
-            self._comp(f"{pastes[0].name} (solder paste {t_p * 1000:.0f} um)", o.paste_color, solids, pastes[0].name)
+            solids = self.geo.prisms(P, *zr(z0, z0 + sg * t_p))
+            self._comp(f"{pastes[0].name} (solder paste {t_p * 1000:.0f} um)", o.paste_color, solids, pastes[0].name,
+                       "paste")
 
     def _build_hole_bodies(self):
         o = self.opts
@@ -1476,11 +1497,11 @@ class Model:
             if h.fill:
                 if bore_t:
                     r_b, z_e = bore_t
-                    s = Brep.disc_prism(h.x, h.y, r_b, 0.0, z_e, h.z_hi - ct)
+                    s = self.geo.disc_prism(h.x, h.y, r_b, 0.0, z_e, h.z_hi - ct)
                     fills.append((h.fill, [s] if s is not None else []))
                 if bore_b:
                     r_b, z_e = bore_b
-                    s = Brep.disc_prism(h.x, h.y, r_b, 0.0, h.z_lo + cb, z_e)
+                    s = self.geo.disc_prism(h.x, h.y, r_b, 0.0, h.z_lo + cb, z_e)
                     fills.append((h.fill, [s] if s is not None else []))
             bottom_cup = None
             if h.laser:
@@ -1491,25 +1512,25 @@ class Model:
                     bottom_cup = (h.z_hi_eff - tp, h.z_hi_eff)
             if zhi - zlo > 1e-6:      # barrel left (a via can be back drilled from both sides)
                 if h.round:
-                    s = Brep.disc_prism(h.x, h.y, h.r_drill, h.r_fin, zlo, zhi)
+                    s = self.geo.disc_prism(h.x, h.y, h.r_drill, h.r_fin, zlo, zhi)
                     if s is not None:
                         plating.append(s)
                     if bottom_cup and h.r_fin > 0:
-                        s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, *bottom_cup)
+                        s = self.geo.disc_prism(h.x, h.y, h.r_fin, 0.0, *bottom_cup)
                         if s is not None:
                             plating.append(s)
                 else:
                     ring = clean(gdiff(h.geom_drill, h.geom_fin))
-                    plating += Brep.prisms(ring, zlo, zhi)
+                    plating += self.geo.prisms(ring, zlo, zhi)
                 if h.dual:
                     r_dd, z_end, side = h.dual
                     surf = self._surface(side)
                     a, b = (z_end, surf) if side == "top" else (surf, z_end)
-                    s = Brep.disc_prism(h.x, h.y, r_dd, max(r_dd - tp, h.r_fin), a, b)
+                    s = self.geo.disc_prism(h.x, h.y, r_dd, max(r_dd - tp, h.r_fin), a, b)
                     if s is not None:
                         plating.append(s)
                     fa, fb = (z_end, z_end + tp) if side == "top" else (z_end - tp, z_end)
-                    s = Brep.disc_prism(h.x, h.y, max(r_dd - tp, h.r_fin), h.r_fin, fa, fb)
+                    s = self.geo.disc_prism(h.x, h.y, max(r_dd - tp, h.r_fin), h.r_fin, fa, fb)
                     if s is not None:
                         plating.append(s)
                 # fill / plugs inside the finished bore
@@ -1523,36 +1544,36 @@ class Model:
                     if h.fill:
                         fill_mats[h.fill] += 1
                         if h.round:
-                            s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, f_lo, f_hi)
+                            s = self.geo.disc_prism(h.x, h.y, h.r_fin, 0.0, f_lo, f_hi)
                             fills.append((h.fill, [s] if s is not None else []))
                         else:
-                            fills.append((h.fill, Brep.prisms(h.geom_fin, f_lo, f_hi)))
+                            fills.append((h.fill, self.geo.prisms(h.geom_fin, f_lo, f_hi)))
                     else:
                         Ltot = f_hi - f_lo
                         for frac, a, b in ((h.plug_top, f_hi - h.plug_top * Ltot, f_hi),
                                            (h.plug_bot, f_lo, f_lo + h.plug_bot * Ltot)):
                             if frac > 0:
                                 if h.round:
-                                    s = Brep.disc_prism(h.x, h.y, h.r_fin, 0.0, a, b)
+                                    s = self.geo.disc_prism(h.x, h.y, h.r_fin, 0.0, a, b)
                                     if s is not None:
                                         plugs.append(s)
                                 else:
-                                    plugs += Brep.prisms(h.geom_fin, a, b)
+                                    plugs += self.geo.prisms(h.geom_fin, a, b)
             # caps close the drilled hole (or the filled back drill bore) flush with
             # the land surface (the land copper thickness already includes the cap plating)
             for r, a, b, bore in ((h.cap_top, h.z_hi - ct, h.z_hi, bore_t), (h.cap_bot, h.z_lo, h.z_lo + cb, bore_b)):
                 if r <= 0 or b - a <= 1e-9:
                     continue
                 if bore:
-                    s = Brep.disc_prism(h.x, h.y, bore[0], 0.0, a, b)
+                    s = self.geo.disc_prism(h.x, h.y, bore[0], 0.0, a, b)
                     if s is not None:
                         caps.append(s)
                 elif h.round:
-                    s = Brep.disc_prism(h.x, h.y, h.r_drill, 0.0, a, b)
+                    s = self.geo.disc_prism(h.x, h.y, h.r_drill, 0.0, a, b)
                     if s is not None:
                         caps.append(s)
                 else:
-                    caps += Brep.prisms(h.geom_drill, a, b)
+                    caps += self.geo.prisms(h.geom_drill, a, b)
         um = sorted({t for (_, t) in tps})
         if len(um) <= 1:
             label = f"Hole plating ({(um[0] if um else (o.plating_thickness or DEFAULTS['plating']) * 1000):.0f} um)"
@@ -1564,17 +1585,17 @@ class Model:
                     who = "PTH" if kind == "pth" else "vias"
                     parts.append(f"{who} " + "/".join(f"{t:g}" for t in ts) + " um")
             label = "Hole plating (" + ", ".join(parts) + ")"
-        self._comp(label, o.plating_color, plating, "PLATING")
+        self._comp(label, o.plating_color, plating, "PLATING", "plating")
         by_mat = defaultdict(list)
         for mat, ss in fills:
             by_mat[mat].extend(ss)
         for mat, ss in by_mat.items():
             col = o.fill_color if o.fill_color != "auto" else parse_color(
                 {"copper": "copper", "silver": "silver"}.get(mat, "epoxy"))
-            self._comp(f"Via fill ({mat})", col, ss, "VIA_FILL")
+            self._comp(f"Via fill ({mat})", col, ss, "VIA_FILL", "fill")
         col = o.fill_color if o.fill_color != "auto" else parse_color("epoxy")
-        self._comp("Via plug (epoxy)", col, plugs, "VIA_PLUG")
-        self._comp(f"Via caps ({o.cap_thickness * 1000:.0f} um)", o.cap_color, caps, "VIA_CAP")
+        self._comp("Via plug (epoxy)", col, plugs, "VIA_PLUG", "plug")
+        self._comp(f"Via caps ({o.cap_thickness * 1000:.0f} um)", o.cap_color, caps, "VIA_CAP", "cap")
 
     def _apply_cones(self):
         gp, BP = OCC.gp, OCC.BP

@@ -10,6 +10,8 @@ frame of the fab data; layers are listed top first.
 
 from __future__ import annotations
 
+import copy
+
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -231,6 +233,29 @@ class Board:
     prot_notes: List[str] = field(default_factory=list)     # via protection report lines
     report_extra: Optional[Callable[[], None]] = None       # reader-specific lines at the end of the report
     after_build: Optional[Callable[[], None]] = None        # reader-specific report after the build
+
+    def fresh(self) -> "Board":
+        """A copy for one model: the records the builder changes (holes,
+        counterholes, back drills, dual drills, hints, report lines) are copied,
+        the layers and their geometry shared. A read board stays as read, so it
+        can be prepared again with other settings."""
+        b = copy.copy(self)
+
+        def dup(x):
+            y = copy.copy(x)
+            for k, v in vars(y).items():
+                if isinstance(v, (list, dict)):
+                    setattr(y, k, copy.copy(v))
+            return y
+        b.holes = [dup(h) for h in self.holes]
+        b.counterholes = [dup(c) for c in self.counterholes]
+        b.backdrills = [dup(x) for x in self.backdrills]
+        b.duals = [dup(x) for x in self.duals]
+        b.routs = list(self.routs)
+        b.hints = [dup(q) for q in self.hints]
+        b.hint_notes, b.notes, b.prot_notes = list(self.hint_notes), list(self.notes), list(self.prot_notes)
+        b.other_steps = list(self.other_steps)
+        return b
 
 
 # --------------------------------------------------------------------------

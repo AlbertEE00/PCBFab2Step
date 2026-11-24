@@ -26,10 +26,9 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from . import __version__
-from .board import parse_via_rule
-from .common import Log, info, warn
-from .config import (NAMED_COLORS, SCHEMA, ConfigError, check_config, config_template, init_fab_folder,
-                     is_counterhole_token, load_config, resolve)
+from .common import Log, info
+from .config import (NAMED_COLORS, SCHEMA, ConfigError, config_template, init_fab_folder,
+                     is_counterhole_token)
 
 COUNTERHOLE_FLAGS = ("--counterhole", "--counterhole-top", "--counterhole-bottom", "--counterhole-bot")
 
@@ -343,129 +342,37 @@ def _check_scope(args):
 # --------------------------------------------------------------------------
 
 
-def _safe_name(s: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]+', "_", s).strip()
-
-
 def run(args, mode: str) -> int:
     """mode: model, export or info."""
-    from . import exports, ipc2581, ncdrill, odbpp
-    from .brep import ArcFit, Brep, write_step
-    from .builder import Model, parse_size_rule, write_svgs
-    from .geometry import Tess
-    from .sources import LABEL, choose, discover
+    from . import exports
+    from .brep import ArcFit
+    from .pipeline import Job
 
     Log.reset(0 if args.quiet else args.verbose)
-    t0 = time.time()
     if mode != "info":
         _check_scope(args)
-    srcs = discover(args.inputs, args.config, args.no_config)
-    cfg, label = None, "config.toml"
-    if srcs.config:
-        cfg = load_config(srcs.config)
-        label = os.path.basename(srcs.config)
-        for w in check_config(cfg, label):
-            warn(w)
-    cli = settings_from_args(args)
-    try:
-        opts = resolve(cli, cfg, label)
-        opts.via_rules = [parse_via_rule(s) for s in opts.via_protection]
-    except (ConfigError, ValueError) as exc:
-        raise SystemExit(str(exc))
-    for spec in opts.counterbore_rules:
-        parse_size_rule(spec, "counterbore")
-    for spec in opts.countersink_rules:
-        parse_size_rule(spec, "countersink")
-    opts.list = mode == "info"
-    opts.external_only = opts.sanitize != "none"
-    opts.outer_copper = {"exposed": "exposed", "pads": "pads"}.get(opts.sanitize, "all")
-    opts.vias = cli.vias_drilled
-    opts.export_outline = args.outline
-    opts.export_invert = args.invert
-    Tess.tol = max(1e-5, opts.arc_tolerance)
-    ArcFit.enabled = opts.arc_fit != "off"
-    ArcFit.strict = opts.arc_fit == "strict"
-    Brep.max_holes = opts.max_holes_per_face
-
-    choose(srcs, opts.use_sources)
-    info(f"Input    : {LABEL[srcs.primary]} {srcs.primary_path}")
-    for k, path in (("ipc", srcs.ipc_hints), ("odb", srcs.odb_types), ("step", srcs.step)):
-        if path:
-            info(f"           {LABEL[k]} {path}")
-    for d in srcs.drill:
-        info(f"           NC drill {d}")
-    if srcs.config:
-        info(f"Config   : {srcs.config}")
-    for nt in srcs.notes:
-        info("  " + nt)
-
-    if srcs.primary == "odb":
-        reader = odbpp.OdbReader(srcs.primary_path, opts)
-    else:
-        reader = ipc2581.IpcReader(srcs.primary_path, opts)
-    board = reader.read()
-    if srcs.ipc_hints:
-        hints, notes = ipc2581.read_hints(srcs.ipc_hints)
-        board.hints += hints
-        board.hint_notes += notes
-    if srcs.odb_types:
-        board.prot_notes += odbpp.apply_via_types(srcs.odb_types, opts, board)
-    if "drill" in srcs.use:
-        inside = ncdrill.pool_from_files("inside the ODB++ input", reader.inside_files()) \
-            if srcs.primary == "odb" else None
-        explicit = [p for p in srcs.explicit["drill"]]
-        chosen, notes = ncdrill.find_reports(explicit, inside, [], ncdrill._stem(srcs.primary_path), srcs.drill)
-        hints, notes2 = ncdrill.read_hints(chosen)
-        board.hints = hints + board.hints          # NC drill first: it has exact counterbore depths
-        board.hint_notes += notes + notes2
-
-    model = Model(board, opts)
-    model.prepare()
+    job = Job(args, mode)
+    for line in job.input_lines():
+        info(line)
+    job.read()
+    model = job.prepare()
     if mode == "info":
         model.report()
         info("\nExport targets (generic / name in the fab data):")
         for e in exports.targets(model):
             info(f"  {e.generic:<14} {e.fab}" + ("" if e.has_data() else "   (empty)"))
         return 0
-    base = _safe_name(board.name)
-    os.makedirs(srcs.out_dir, exist_ok=True)
-
     if mode == "export":
-        written = exports.export(model, args.export, opts, srcs.out_dir, base, args.output)
-        for p in written:
+        for p in job.write_export():
             info(f"Wrote {p}")
-        info(f"Done in {time.time() - t0:.1f} s")
+        info(f"Done in {time.time() - job.t0:.1f} s")
         return 0
 
     model.report()
     info("\nBuilding solids ...")
-    model.build()
-    if board.after_build is not None:
-        board.after_build()
-    if opts.svg_dir:
-        write_svgs(opts.svg_dir, model.svg, model.B)
-    out = opts.output
-    if out and opts.sources.get("output", "").startswith(label) and srcs.config:
-        out = os.path.join(os.path.dirname(os.path.abspath(srcs.config)), out)
-    if not out:
-        suffix = f"_sanitized-{opts.sanitize}" if opts.sanitize != "none" else ""
-        out = os.path.join(srcs.out_dir, f"{base}{suffix}.step")
-    if srcs.step and opts.components:
-        from . import components
-        st = model.stk
-        t_mask = {side: (0.0 if opts.no_mask else max((L.t for L in st.coats[side].get("mask", [])), default=0.0))
-                  for side in ("top", "bottom")}
-        info("\nComponents:")
-        parts = components.read(srcs.step, model.B.bounds, st.z_top + t_mask["top"], st.z_bot - t_mask["bottom"])
-        if parts:
-            for c in model.components:
-                c["path"] = ("PCB",)
-            model.components += parts
-    info(f"Writing {out} ...")
-    root = f"{board.name} {board.step}".strip()
-    write_step(out, root, model.components, opts.schema, fmt=LABEL[srcs.primary])
+    out = job.write_model()
     nsol = sum(len(c["solids"]) for c in model.components)
-    info(f"\nDone in {time.time() - t0:.1f} s: {len(model.components)} bodies, {nsol} solids, "
+    info(f"\nDone in {time.time() - job.t0:.1f} s: {len(model.components)} bodies, {nsol} solids, "
          f"{ArcFit.stats['circles']} circles and {ArcFit.stats['arcs']} arcs rebuilt exactly, "
          f"{os.path.getsize(out) / 1e6:.1f} MB")
     for c in model.components:
