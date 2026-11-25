@@ -310,17 +310,36 @@ class Brep:
 
     # .. ring analysis (pure numpy/shapely) ...................................
     @staticmethod
+    def clean_ring(P: np.ndarray) -> np.ndarray:
+        """Drop what boolean operations leave and OpenCascade rejects: points
+        within 50 nm of the next one (a zero-length edge fails the whole wire)
+        and the tips of spikes, where the ring runs out and straight back
+        along itself (GEOS takes such a ring as simple, OpenCascade as
+        self-intersecting, and the face is invalid)."""
+        for _ in range(6):
+            if len(P) < 4:
+                break
+            nxt = np.roll(P, -1, axis=0)
+            dd = np.hypot(*(nxt - P).T)
+            keep = dd > 5e-5
+            a, b = P - np.roll(P, 1, axis=0), nxt - P
+            la, lb = np.hypot(*a.T), np.hypot(*b.T)
+            cross = a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
+            dot = (a * b).sum(axis=1)
+            spike = (dot < 0) & (np.abs(cross) <= 1e-3 * la * lb) & keep
+            keep &= ~spike
+            if keep.all() or keep.sum() < 3:
+                break
+            P = P[keep]
+        return P
+
+    @staticmethod
     def ring_spec(coords):
         """-> (P, full_circle, arcs). P is the cleaned vertex array."""
         P = np.asarray(coords, dtype=float)[:, :2]
         if len(P) > 1 and abs(P[0, 0] - P[-1, 0]) < 1e-12 and abs(P[0, 1] - P[-1, 1]) < 1e-12:
             P = P[:-1]
-        for _ in range(2):
-            if len(P) >= 3:
-                dd = np.hypot(*(np.roll(P, -1, axis=0) - P).T)
-                keep = dd > 5e-5
-                if keep.sum() >= 3 and not keep.all():
-                    P = P[keep]
+        P = Brep.clean_ring(P)
         if not ArcFit.enabled or len(P) < 4:
             return P, None, []
         # fast path: the whole ring on one circle (pads, holes, vias)
@@ -591,7 +610,7 @@ class Brep:
     @classmethod
     def _poly_face(cls, poly, z):
         rings = [poly.exterior] + list(poly.interiors)
-        plain = [(np.asarray(r.coords)[:-1, :2], None, []) for r in rings]
+        plain = [(cls.clean_ring(np.asarray(r.coords)[:-1, :2]), None, []) for r in rings]
         specs = [cls.ring_spec(r.coords) for r in rings] if ArcFit.enabled else plain
         if ArcFit.enabled:
             # fitted rings must stay simple and disjoint (checked on a dense
@@ -635,10 +654,11 @@ class Brep:
                         ArcFit.stats["unfitted_rings"] += 1
                         specs[k] = plain[k]
                         changed = True
-                f = cls._build_face(specs, z) if changed else None
-                if f is None or abs(cls._area(f) - poly.area) > lim:
+                f2 = cls._build_face(specs, z) if changed else None
+                if f2 is None or abs(cls._area(f2) - poly.area) > lim:
                     ArcFit.stats["fallbacks"] += 1
-                    f = cls._build_face(plain, z)
+                    f2 = cls._build_face(plain, z)
+                f = f2 if f2 is not None else f       # never trade a face for none
         if f is not None and len(rings) <= 50 and not cls._valid(f):
             f2 = cls._build_face(plain, z)
             if cls._valid(f2):
@@ -699,8 +719,17 @@ class Brep:
                     pieces = [poly]
             for q in pieces:
                 f = cls._poly_face(q, z)
-                if f is not None:
-                    out.append(f)
+                if f is None:                          # last resort: GEOS rebuilds the rings
+                    for r in iter_polys(clean(q.buffer(0))):
+                        f = cls._poly_face(orient(r, 1.0), z)
+                        if f is not None:
+                            out.append(f)
+                        else:
+                            c = r.representative_point()
+                            warn(f"a region of {r.area:.3f} mm2 at z {z:.3f} near ({c.x:.3f}, {c.y:.3f}) mm "
+                                 "could not be made a B-rep face: left out of the STEP")
+                    continue
+                out.append(f)
         return out
 
     @classmethod
@@ -715,6 +744,15 @@ class Brep:
             if pm.IsDone():
                 out.append(pm.Shape())
         return out
+
+    @classmethod
+    def sheets(cls, geom, z: float, sg: float = 1.0):
+        """Faces only (a surface body), at z; facing up on the top side (sg 1),
+        down on the bottom (sg -1)."""
+        if geom is None or geom.is_empty:
+            return []
+        out = cls.faces(geom, z)
+        return out if sg > 0 else [f.Reversed() for f in out]
 
     @staticmethod
     def disc_prism(x, y, r_out, r_in, z0, z1):

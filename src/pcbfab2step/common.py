@@ -26,6 +26,7 @@ VALID_RANGE = dict(mask=(0.005, 0.100), silk=(0.005, 0.100), finish=(0.00005, 0.
 class Log:
     verbose = 1
     warnings: List[str] = []
+    sink = None          # callable(line): also receives every line printed (the GUI's log)
 
     @classmethod
     def reset(cls, verbose: int = 1) -> None:
@@ -33,16 +34,22 @@ class Log:
         cls.warnings = []
 
 
+def _emit(line: str) -> None:
+    print(line, flush=True)
+    if Log.sink is not None:
+        Log.sink(line)
+
+
 def info(msg: str, level: int = 1) -> None:
     if Log.verbose >= level:
-        print(msg, flush=True)
+        _emit(msg)
 
 
 def warn(msg: str) -> None:
     if msg not in Log.warnings:
         Log.warnings.append(msg)
         if Log.verbose >= 1:
-            print("WARNING: " + msg, flush=True)
+            _emit("WARNING: " + msg)
 
 
 def name_tokens(name: str) -> set:

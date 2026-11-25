@@ -1,6 +1,6 @@
 [project]
 name = "pcbfab2step"
-version = "2.1.1"
+version = "2.3.0"
 description = "Convert PCB fab data (ODB++, IPC-2581, NC drill) to coloured STEP models: full stackup, copper, mask, silkscreen, finish, holes, counterholes, back drills and via protection"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -25,12 +25,17 @@ classifiers = [
 [project.optional-dependencies]
 # TrueType text fallback for ODB++ text without a stroke font, and tools/section_plot.py
 plot = ["matplotlib"]
+# the viewer and the GUI in a window of their own (Edge WebView2 on Windows)
+gui = ["pywebview>=5.0"]
 
 [project.urls]
 Repository = "https://github.com/AlbertEE00/PCBFab2Step"
 
 [project.scripts]
 pcbfab2step = "pcbfab2step.cli:main"
+
+[project.gui-scripts]
+pcbfab2step-gui = "pcbfab2step.gui:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "matplotlib"]

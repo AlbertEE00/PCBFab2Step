@@ -89,6 +89,8 @@ SCHEMA = [
      "STEP model to write (default: PCBFab2Step/<board>.step in the folder given)"),
     ("output", "schema", "schema", ("AP214", "AP242", "AP203"), "AP214", "AP214", "STEP application protocol"),
     ("output", "svg_dir", "svg_dir", "str", None, "default", "also write the 2D layer regions as SVG files here"),
+    ("output", "mesh", "mesh_from", ("preview", "exact"), "preview", "preview",
+     "mesh files (glb, obj, fbx, stl, ...): the preview's meshes (quick) or the STEP's own solids, tessellated"),
 
     ("sources", "use", "use_sources", "str", None, "auto",
      "which of the found sources to use, the first geometry source as the board: odb, ipc, drill, step, "
@@ -100,6 +102,9 @@ SCHEMA = [
      "outer copper cut to pads and the copper the solder mask leaves open), pads (outer copper: pads only)"),
     ("model", "components", "components", "bool", True, True,
      "add the components of the ECAD STEP export when one is found"),
+    ("model", "hide", "hide_bodies", "list", [], [],
+     "bodies left out of the model: silk-bot, solder-top, finish-bot, paste-top, copper-3, components-top, a "
+     "designator (U1) or a layer name of the fab data; --hide adds to these, --show takes them back"),
 
     ("export", "stencil_thickness", "stencil_thickness", "mm", 0.1, 0.1,
      "stencil plate thickness for --export stencil-...:step, mm"),
@@ -124,6 +129,11 @@ SCHEMA = [
     ("silkscreen", "color", "silk_color", "color", "white", "white", "silkscreen colour"),
     ("silkscreen", "thickness", "silk_thickness", "mm", None, "default", "mm (default: fab data, else 0.020)"),
     ("silkscreen", "clip_to_mask", "clip_silk", "bool", True, True, "remove silkscreen over mask openings"),
+    ("silkscreen", "simplify", "silk_simplify", "mm", 0.002, 0.002,
+     "leave out detail smaller than this from the silkscreen outline (text, logos are drawn with points a few "
+     "um apart): a STEP several times smaller; 0 keeps every point"),
+    ("silkscreen", "body", "silk_body", ("solid", "surface"), "solid", "solid",
+     "solid: a body as thick as the silkscreen; surface: only its top face (about 4x smaller STEP)"),
 
     ("finish", "enabled", "finish", "bool", True, True, "build the surface finish"),
     ("finish", "type", "finish_type", "str", None, "default",
@@ -179,6 +189,9 @@ SCHEMA = [
     ("geometry", "rout", "rout", ("auto", "cut", "ignore"), "auto", "auto",
      "rout layers: auto cuts internal rout paths only, cut all, or ignore"),
     ("geometry", "arc_tolerance", "arc_tolerance", "float", 0.001, 0.001, "tessellation chord error, mm"),
+    ("geometry", "simplify", "simplify", "mm", 0.0, 0.0,
+     "leave out detail smaller than this from every layer's outline (0: off); smaller STEP files, outlines "
+     "move by up to this much"),
     ("geometry", "arc_fit", "arc_fit", ("loose", "strict", "off"), "loose", "loose",
      "rebuild true arcs and circles in the STEP"),
     ("geometry", "max_holes_per_face", "max_holes_per_face", "int", 1000, 1000,
@@ -371,7 +384,8 @@ def resolve(cli, cfg: Optional[dict], cfg_label: str = "config.toml") -> SimpleN
     # list settings add up: config rules first, then command line rules
     for attr, sec, key in (("via_protection", "vias", "rules"),
                            ("counterbore_rules", "counterholes", "counterbore_rules"),
-                           ("countersink_rules", "counterholes", "countersink_rules")):
+                           ("countersink_rules", "counterholes", "countersink_rules"),
+                           ("hide_bodies", "model", "hide")):
         cv = cfg.get(sec, {}).get(key) if isinstance(cfg.get(sec), dict) else None
         lst = _convert("list", cv, key) if cv else []
         lst += list(getattr(cli, attr, None) or [])

@@ -26,16 +26,17 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from . import __version__
-from .board import parse_via_rule
-from .common import Log, info, warn
-from .config import (NAMED_COLORS, SCHEMA, ConfigError, check_config, config_template, init_fab_folder,
-                     is_counterhole_token, load_config, resolve)
+from .common import Log, info
+from .config import (NAMED_COLORS, SCHEMA, ConfigError, config_template, init_fab_folder,
+                     is_counterhole_token)
 
 COUNTERHOLE_FLAGS = ("--counterhole", "--counterhole-top", "--counterhole-bottom", "--counterhole-bot")
 
 USAGE = """
   pcbfab2step [INPUT ...] [options]                         the board as a STEP model
   pcbfab2step [INPUT ...] --export TARGET:FORMAT [options]  one layer as DXF, SVG or STEP
+  pcbfab2step [INPUT ...] [options] --view [exact]          show it instead (nothing written)
+  pcbfab2step gui [INPUT ...] [options]                     the same in a window
   pcbfab2step info [INPUT ...]                              what was found, stackup, holes, targets
   pcbfab2step init [FOLDER]                                 config.toml with every setting
   pcbfab2step settings                                      every setting and its default"""
@@ -55,6 +56,13 @@ EPILOG = """examples:
   pcbfab2step FAB --export outline:step                 the plain PCB body
   pcbfab2step board.cvg parts.step                      IPC-2581 board with the parts of a STEP
   pcbfab2step FAB --sources ipc+drill+step              IPC-2581 as the board, the ODB++ not read
+  pcbfab2step FAB --sanitize --view                     look at the model first, write nothing
+  pcbfab2step FAB --export copper-top:svg --view        the layer as it would be written
+  pcbfab2step gui FAB                                   the options in a window, with a 3D view
+
+viewer (--view, and the GUI): a preview is meshed straight from the 2D regions in a second or
+  two; --view exact (the GUI's Exact button) builds the STEP's own solids and shows those.
+  The window needs pywebview (pip install pcbfab2step[gui]); without it the browser shows it.
 
 inputs:
   A folder is searched with its subfolders; a file also brings the other outputs in its folder,
@@ -65,7 +73,7 @@ inputs:
   other sources add what it lacks (IPC-2581: counterhole types; NC drill: counterhole depths;
   ODB++ next to IPC-2581: via types). Gerber is found but not read yet.
 
-export targets (--export TARGET:FORMAT, FORMAT dxf, svg or step; several: dxf,svg):
+export targets (--export TARGET:FORMAT, FORMAT dxf, svg, step or a mesh format; several: dxf,svg):
   A layer is exported as it is on the board (as in the model), not as the artwork.
   outline                      DXF/SVG: the board outline; STEP: the plain PCB body
   paste-top   paste-bot        solder paste deposits
@@ -74,6 +82,8 @@ export targets (--export TARGET:FORMAT, FORMAT dxf, svg or step; several: dxf,sv
   solder-top  solder-bot       the solder mask: outline minus its openings, tented vias closed
   silk-top    silk-bot         silkscreen, clipped to the solder mask
   copper-top  copper-bot  copper-N   copper layer (holes cut), N counted from the top
+  components-top components-bot   the ECAD STEP's parts of one side, placed as in the model
+                               (STEP or a mesh format)
   or a layer's name in the fab data ('pcbfab2step info' lists them). Without -top/-bot the
   side with data is taken. --invert: the rest of the outline instead (mask openings, the paste
   of a stencil, the clearances in the copper). DXF and SVG include the outline (--no-outline
@@ -139,12 +149,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hide design detail: outer (inner layers merged into one core, vias not drilled), "
                         "exposed (also outer copper cut to pads and what the solder mask leaves open; the "
                         "default), pads (outer copper: pads only)")
+    m.add_argument("--format", choices=["step", "glb", "gltf", "obj", "fbx", "stl", "ply", "3mf"], default=None,
+                   help="the model as STEP (default) or as a mesh: glb, gltf, obj (+ mtl), fbx, stl, ply, 3mf; "
+                        "an -o file name with one of these extensions does the same")
     m.add_argument("--vias", action="append", default=[], metavar="RULE",
                    help="via protection over the fab data, or undrilled / drilled (repeatable; see below)")
     m.add_argument("--show", action="append", default=[], metavar="LIST",
-                   help="build these too: paste (off by default), or mask, silk, finish, components")
+                   help="build these too: paste (off by default), or mask, silk, finish, components; or one body "
+                        "a config.toml hides (silk-bot, ...)")
     m.add_argument("--hide", action="append", default=[], metavar="LIST",
-                   help="leave out: mask, silk, finish, paste, components")
+                   help="leave out: mask, silk, finish, paste, components (both sides), or single bodies: "
+                        "silk-bot, solder-top, finish-top, paste-bot, copper-2, components-bot, a designator "
+                        "(U1) or a layer name")
     m.add_argument("--counterhole", action="append", default=[], metavar="SPEC",
                    help="both sides: type=bore|sink angle=DEG depth=SIZE (see below)")
     m.add_argument("--counterhole-top", action="append", default=[], metavar="SPEC", help="top side")
@@ -180,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="any config.toml setting, e.g. --set finish.type=ENIG ('pcbfab2step settings' "
                         "lists them)")
 
+    v = p.add_argument_group("viewer")
+    v.add_argument("--view", nargs="?", const="fast", choices=["fast", "exact"], metavar="exact",
+                   help="show the model (or the --export layer) as it would be written, and write nothing; "
+                        "exact: the STEP's own solids (slower)")
+
     g = p.add_argument_group("messages")
     g.add_argument("-v", "--verbose", action="count", default=1, help="more detail")
     g.add_argument("-q", "--quiet", action="store_true", help="errors and warnings only")
@@ -198,6 +219,10 @@ def join_counterhole_args(argv: List[str]) -> List[str]:
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == "--view" and i + 1 < len(argv) and argv[i + 1] not in ("fast", "exact"):
+            out.append("--view=fast")                      # --view INPUT: the input is not its value
+            i += 1
+            continue
         if a in SIGNED and i + 1 < len(argv) and re.match(r"-[\d.]", argv[i + 1]):
             out.append(f"{a}={argv[i + 1]}")
             i += 2
@@ -242,7 +267,7 @@ def settings_from_args(args) -> SimpleNamespace:
     c = SimpleNamespace(layer_thickness=[], via_protection=[], counterhole=list(args.counterhole),
                         counterhole_top=list(args.counterhole_top),
                         counterhole_bottom=list(args.counterhole_bottom), counterbore_rules=[],
-                        countersink_rules=[], vias_drilled=None, _labels={})
+                        countersink_rules=[], vias_drilled=None, hide_bodies=[], show_bodies=[], _labels={})
     lab = c._labels
     by_key = {f"{sec}.{key}": (attr, kind) for sec, key, attr, kind, *_ in SCHEMA}
     for item in args.set:
@@ -296,13 +321,18 @@ def settings_from_args(args) -> SimpleNamespace:
     for flag, vals, on in (("--show", args.show, True), ("--hide", args.hide, False)):
         for item in _items(vals):
             attr = SHOW_KEYS.get(_key(item))
-            if not attr:
-                raise SystemExit(f"{flag} {item}: no such item (mask, silk, finish, paste, components)")
+            if not attr:                                  # one body: silk-bot, copper-3, U1, a layer name
+                (c.show_bodies if on else c.hide_bodies).append(item)
+                lab["hide_bodies"] = flag
+                continue
             if attr in shown and shown[attr] != on:
                 raise SystemExit(f"{item} is both shown and hidden")
             shown[attr] = on
             setattr(c, attr, on)
             lab[attr] = f"{flag} {item}"
+    both = {_key(x) for x in c.hide_bodies} & {_key(x) for x in c.show_bodies}
+    if both:
+        raise SystemExit(f"{', '.join(sorted(both))}: both shown and hidden")
     for item in args.vias:
         t = item.strip().lower()
         if t in ("undrilled", "nodrill", "no-drill", "off"):
@@ -328,7 +358,7 @@ def settings_from_args(args) -> SimpleNamespace:
 
 def _check_scope(args):
     """One call, one output: flags of the other output are mistakes."""
-    model_only = [f for f, v in (("--show", args.show), ("--hide", args.hide)) if v]
+    model_only = [f for f, v in (("--show", args.show), ("--hide", args.hide), ("--format", args.format)) if v]
     if args.export and model_only:
         raise SystemExit(f"{', '.join(model_only)}: acts on the board model, not on --export")
     export_only = [f for f, v in (("--outline/--no-outline", args.outline is not None),
@@ -343,129 +373,43 @@ def _check_scope(args):
 # --------------------------------------------------------------------------
 
 
-def _safe_name(s: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]+', "_", s).strip()
-
-
 def run(args, mode: str) -> int:
     """mode: model, export or info."""
-    from . import exports, ipc2581, ncdrill, odbpp
-    from .brep import ArcFit, Brep, write_step
-    from .builder import Model, parse_size_rule, write_svgs
-    from .geometry import Tess
-    from .sources import LABEL, choose, discover
+    from . import exports
+    from .brep import ArcFit
+    from .pipeline import Job
 
     Log.reset(0 if args.quiet else args.verbose)
-    t0 = time.time()
     if mode != "info":
         _check_scope(args)
-    srcs = discover(args.inputs, args.config, args.no_config)
-    cfg, label = None, "config.toml"
-    if srcs.config:
-        cfg = load_config(srcs.config)
-        label = os.path.basename(srcs.config)
-        for w in check_config(cfg, label):
-            warn(w)
-    cli = settings_from_args(args)
-    try:
-        opts = resolve(cli, cfg, label)
-        opts.via_rules = [parse_via_rule(s) for s in opts.via_protection]
-    except (ConfigError, ValueError) as exc:
-        raise SystemExit(str(exc))
-    for spec in opts.counterbore_rules:
-        parse_size_rule(spec, "counterbore")
-    for spec in opts.countersink_rules:
-        parse_size_rule(spec, "countersink")
-    opts.list = mode == "info"
-    opts.external_only = opts.sanitize != "none"
-    opts.outer_copper = {"exposed": "exposed", "pads": "pads"}.get(opts.sanitize, "all")
-    opts.vias = cli.vias_drilled
-    opts.export_outline = args.outline
-    opts.export_invert = args.invert
-    Tess.tol = max(1e-5, opts.arc_tolerance)
-    ArcFit.enabled = opts.arc_fit != "off"
-    ArcFit.strict = opts.arc_fit == "strict"
-    Brep.max_holes = opts.max_holes_per_face
-
-    choose(srcs, opts.use_sources)
-    info(f"Input    : {LABEL[srcs.primary]} {srcs.primary_path}")
-    for k, path in (("ipc", srcs.ipc_hints), ("odb", srcs.odb_types), ("step", srcs.step)):
-        if path:
-            info(f"           {LABEL[k]} {path}")
-    for d in srcs.drill:
-        info(f"           NC drill {d}")
-    if srcs.config:
-        info(f"Config   : {srcs.config}")
-    for nt in srcs.notes:
-        info("  " + nt)
-
-    if srcs.primary == "odb":
-        reader = odbpp.OdbReader(srcs.primary_path, opts)
-    else:
-        reader = ipc2581.IpcReader(srcs.primary_path, opts)
-    board = reader.read()
-    if srcs.ipc_hints:
-        hints, notes = ipc2581.read_hints(srcs.ipc_hints)
-        board.hints += hints
-        board.hint_notes += notes
-    if srcs.odb_types:
-        board.prot_notes += odbpp.apply_via_types(srcs.odb_types, opts, board)
-    if "drill" in srcs.use:
-        inside = ncdrill.pool_from_files("inside the ODB++ input", reader.inside_files()) \
-            if srcs.primary == "odb" else None
-        explicit = [p for p in srcs.explicit["drill"]]
-        chosen, notes = ncdrill.find_reports(explicit, inside, [], ncdrill._stem(srcs.primary_path), srcs.drill)
-        hints, notes2 = ncdrill.read_hints(chosen)
-        board.hints = hints + board.hints          # NC drill first: it has exact counterbore depths
-        board.hint_notes += notes + notes2
-
-    model = Model(board, opts)
-    model.prepare()
+    job = Job(args, mode)
+    for line in job.input_lines():
+        info(line)
+    job.read()
+    model = job.prepare()
     if mode == "info":
         model.report()
         info("\nExport targets (generic / name in the fab data):")
         for e in exports.targets(model):
             info(f"  {e.generic:<14} {e.fab}" + ("" if e.has_data() else "   (empty)"))
         return 0
-    base = _safe_name(board.name)
-    os.makedirs(srcs.out_dir, exist_ok=True)
-
     if mode == "export":
-        written = exports.export(model, args.export, opts, srcs.out_dir, base, args.output)
-        for p in written:
+        for p in job.write_export():
             info(f"Wrote {p}")
-        info(f"Done in {time.time() - t0:.1f} s")
+        info(f"Done in {time.time() - job.t0:.1f} s")
         return 0
 
+    if job.model_format() != "step":
+        model.report()
+        for p in job.write_mesh():
+            info(f"Wrote {p}")
+        info(f"Done in {time.time() - job.t0:.1f} s")
+        return 0
     model.report()
     info("\nBuilding solids ...")
-    model.build()
-    if board.after_build is not None:
-        board.after_build()
-    if opts.svg_dir:
-        write_svgs(opts.svg_dir, model.svg, model.B)
-    out = opts.output
-    if out and opts.sources.get("output", "").startswith(label) and srcs.config:
-        out = os.path.join(os.path.dirname(os.path.abspath(srcs.config)), out)
-    if not out:
-        suffix = f"_sanitized-{opts.sanitize}" if opts.sanitize != "none" else ""
-        out = os.path.join(srcs.out_dir, f"{base}{suffix}.step")
-    if srcs.step and opts.components:
-        from . import components
-        st = model.stk
-        t_mask = {side: (0.0 if opts.no_mask else max((L.t for L in st.coats[side].get("mask", [])), default=0.0))
-                  for side in ("top", "bottom")}
-        info("\nComponents:")
-        parts = components.read(srcs.step, model.B.bounds, st.z_top + t_mask["top"], st.z_bot - t_mask["bottom"])
-        if parts:
-            for c in model.components:
-                c["path"] = ("PCB",)
-            model.components += parts
-    info(f"Writing {out} ...")
-    root = f"{board.name} {board.step}".strip()
-    write_step(out, root, model.components, opts.schema, fmt=LABEL[srcs.primary])
+    out = job.write_model()
     nsol = sum(len(c["solids"]) for c in model.components)
-    info(f"\nDone in {time.time() - t0:.1f} s: {len(model.components)} bodies, {nsol} solids, "
+    info(f"\nDone in {time.time() - job.t0:.1f} s: {len(model.components)} bodies, {nsol} solids, "
          f"{ArcFit.stats['circles']} circles and {ArcFit.stats['arcs']} arcs rebuilt exactly, "
          f"{os.path.getsize(out) / 1e6:.1f} MB")
     for c in model.components:
@@ -490,6 +434,9 @@ def init(argv: List[str]) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "gui":
+        from .gui import main as gui_main
+        return gui_main(argv[1:])
     if argv and argv[0] == "init":
         return init(argv[1:])
     if argv and argv[0] == "settings":
@@ -502,6 +449,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.export and mode == "model":
         mode = "export"
     try:
+        if args.view and mode != "info":
+            from .view import run_view
+            Log.reset(0 if args.quiet else args.verbose)
+            _check_scope(args)
+            return run_view(args, mode)
         return run(args, mode)
     except ConfigError as exc:
         raise SystemExit(str(exc))
