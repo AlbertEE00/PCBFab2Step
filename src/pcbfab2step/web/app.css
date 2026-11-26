@@ -226,7 +226,8 @@ body.dragging .drop, .drop.over { border-color: var(--gold-line); background: co
 .stack .acts select.fmt { width: auto; height: 26px; }
 .stack .band { align-self: stretch; border-radius: 1px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); }
 .stack .nm { padding: 5px 0; min-width: 0; }
-.stack .nm b { font-weight: 500; }
+.stack .nm b { font-weight: 500; white-space: nowrap; }
+.stack li.layer .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stack .nm span { color: var(--ink-3); margin-left: 6px; }
 .stack .th { color: var(--ink-3); font-size: 12px; }
 .stack li.diel .nm { padding: 1px 0; color: var(--ink-3); font-size: 11.5px; }

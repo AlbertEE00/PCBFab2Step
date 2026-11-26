@@ -192,6 +192,27 @@ given as an input is used whatever its name.
   the ECAD export therefore never leaves parts floating or sunk in; the
   report gives both thicknesses.
 
+### Surface finish
+
+Altium writes the stackup's surface finish into neither ODB++ nor IPC-2581,
+so a finish layer is rarely in the data. Without one, each side with copper
+gets the finish of `finish.type` (ENIG unless set) on its exposed copper:
+the copper not under the solder mask (`finish.area = "all"`: all outer
+copper; `finish.layers = ["Mechanical 13"]`: where those layers have
+features). With no thickness in the data or in `finish.thickness`, the
+finish is the copper's colour: the copper under it is its own body, named
+for the copper and the finish (`finish.body = "solid"` adds a 4 um body on
+the copper instead). `--hide finish` (or the switch in the GUI) gives plain
+copper; `--hide finish-top` does so on one side.
+
+| Setting | Values |
+|---|---|
+| `finish.type` | ENIG (default), ENEPIG, HASL, ImAg, ImSn, OSP, ...: sets the colour |
+| `finish.body` | `auto` (a body when there is a thickness, else the colour), `solid`, `color` |
+| `finish.area` | `exposed` (default), `all` |
+| `finish.layers` | fab layers that mark the finish areas, names or wildcards |
+| `finish.thickness` | mm; from the fab data when it has a finish layer |
+
 ### Leaving bodies out
 
 `--hide` takes the kinds of body (`mask`, `silk`, `finish`, `paste`,
@@ -532,6 +553,12 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 2.4.0: a surface finish without one in the fab data (Altium leaves it out
+  of ODB++ and IPC-2581): ENIG by default on the exposed copper, as the
+  copper's colour or as a body (`finish.body`, `finish.area`,
+  `finish.layers`); `--hide finish-top` leaves the copper whole. The fast
+  view draws a countersink as a smooth cone (it was stacked discs; the STEP
+  always had the exact cone).
 - 2.3.0: mesh files: `--format glb|gltf|obj|fbx|stl|ply|3mf` (or the `-o`
   extension) for the model, mesh formats for `--export`; `components-top` and
   `components-bot` export targets. `--hide` and `--show` take single bodies

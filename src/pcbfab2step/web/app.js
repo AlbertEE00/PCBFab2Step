@@ -537,13 +537,14 @@ function renderLayers() {
     const viewing = S.layer && S.layer.target === g;
     const canExport = r.export !== false;
     const li = h("li", {
-      class: `layer ${r.kind}${r.kind === "outline" ? " outline" : ""}${r.data ? "" : " nodata"}${viewing || isSel ? " sel" : ""}${shown ? "" : " out"}`,
-      tabindex: "0", role: "button", "aria-expanded": String(isSel), title: r.data ? `${g} (${r.name})` : `${g}: no data in this layer`,
+      class: `layer ${r.kind}${r.kind === "outline" ? " outline" : ""}${r.data || r.kind === "finish" ? "" : " nodata"}${viewing || isSel ? " sel" : ""}${shown ? "" : " out"}`,
+      tabindex: "0", role: "button", "aria-expanded": String(isSel),
+      title: r.kind === "finish" ? `${g}: ${r.material}${r.data ? "" : ", not in the fab data (finish.type)"}${r.t ? "" : ", colours the copper"}` : r.data ? `${g} (${r.name})` : `${g}: no data in this layer`,
     },
       box,
       h("span", { class: "band", style: `background:${rgb(r.color)}` }),
       h("span", { class: "nm" }, h("b", {}, g), r.name && r.name !== g ? h("span", {}, r.name) : null),
-      h("span", { class: "th" }, r.kind === "components" ? "" : r.data ? thick(r.t) : "empty"));
+      h("span", { class: "th" }, r.kind === "components" ? "" : r.kind === "finish" ? (r.t ? `${r.material} ${thick(r.t)}` : r.material) : r.data ? thick(r.t) : "empty"));
     const toggle = () => { if (!canExport) return; selected = isSel ? null : g; renderLayers(); };
     li.addEventListener("click", (e) => { if (!e.target.closest(".acts")) toggle(); });
     li.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target === li) { e.preventDefault(); toggle(); } });

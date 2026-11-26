@@ -137,11 +137,19 @@ SCHEMA = [
 
     ("finish", "enabled", "finish", "bool", True, True, "build the surface finish"),
     ("finish", "type", "finish_type", "str", None, "default",
-     "ENIG, ENEPIG, HASL, ImAg, ImSn, OSP, ... (sets the colour; default: fab data)"),
+     "ENIG, ENEPIG, HASL, ImAg, ImSn, OSP, ... (sets the colour; default: fab data, else ENIG)"),
     ("finish", "color", "finish_color", "color_auto", "auto", "auto", "auto: from the finish type"),
     ("finish", "thickness", "finish_thickness", "mm", None, "default",
-     "mm; without a finish layer in the fab data a value adds finish on all exposed copper "
-     "(default: fab data, else none)"),
+     "mm (default: fab data; Altium's ODB++ and IPC-2581 leave it out)"),
+    ("finish", "body", "finish_body", ("auto", "solid", "color"), "auto", "auto",
+     "solid: a body as thick as the finish on the copper; color: the copper under the finish takes its "
+     "colour (no added thickness); auto: solid when there is a thickness, else color"),
+    ("finish", "area", "finish_area", ("exposed", "all"), "exposed", "exposed",
+     "where the finish goes when the fab data has no finish artwork: exposed (copper not under the solder "
+     "mask) or all (all outer copper)"),
+    ("finish", "layers", "finish_layers", "list", [], [],
+     "fab layers whose features mark where the finish goes (instead of finish.area), names or wildcards; "
+     "a layer of one side applies to that side, others to both"),
 
     ("paste", "enabled", "paste", "bool", False, False, "build solder paste deposits"),
     ("paste", "color", "paste_color", "color", "#a6a6a6", "#a6a6a6", "solder paste colour"),

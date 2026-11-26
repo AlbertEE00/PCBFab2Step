@@ -70,6 +70,11 @@ def body_names(c: dict, copper_index: Optional[dict] = None) -> List[str]:
         names.add(canon(c["layer"]))
     if kind == "copper" and copper_index and c.get("layer") in copper_index:
         names.add(f"copper{copper_index[c['layer']]}")
+    cu = c.get("copper_of")                 # a finish that colours the copper is that copper too
+    if cu:
+        names |= {canon(cu), canon(f"copper-{side}")} | ({canon(f"copper-{SIDE_WORDS[side][0]}")} if side in SIDE_WORDS else set())
+        if copper_index and cu in copper_index:
+            names.add(f"copper{copper_index[cu]}")
     names.discard("")
     return sorted(names)
 
@@ -99,7 +104,7 @@ def drop_hidden(comps: list, model, opts, report: bool = True) -> list:
     if not hide:
         return comps
     idx = copper_index(model)
-    keep, used = [], set()
+    keep, used = [], set(getattr(model, "hidden_done", ()) or ())
     for c in comps:
         hit = hide.intersection(body_names(c, idx))
         if hit:
@@ -110,9 +115,9 @@ def drop_hidden(comps: list, model, opts, report: bool = True) -> list:
         for name in sorted(hide - used):
             warn(f"--hide {name}: no body of that name (silk-bot, solder-top, copper-2, components-top, a "
                  "designator or a layer name)")
+        n = len(comps) - len(keep)
         if used:
-            info(f"  left out: {len(comps) - len(keep)} bod{'y' if len(comps) - len(keep) == 1 else 'ies'} "
-                 f"({', '.join(sorted(used))})")
+            info(f"  left out: {', '.join(sorted(used))}" + (f" ({n} bod{'y' if n == 1 else 'ies'})" if n else ""))
     return keep
 
 

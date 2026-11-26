@@ -107,6 +107,14 @@ def test_state_scene_and_run(gui, ipc_file, tmp_path):
     assert len(blob) == last
     again = _call(gui, "POST", "/api/scene", dict(req, values={"paste": False, "mask_color": "red"}))[1]
     assert again["cached"] and again["id"] == sc["id"]          # colours and paste: the same scene
+    fins = [r for r in sc["stack"] if r["kind"] == "finish"]
+    assert [r["side"] for r in fins] == ["top", "bottom"] and all(r["material"] == "ENIG" for r in fins)
+    hid = _call(gui, "POST", "/api/scene", dict(req, values=dict(req["values"], hide_bodies="silk-bot")))[1]
+    assert hid["cached"]                                          # leaving out a body is a draw
+    hid = _call(gui, "POST", "/api/scene", dict(req, values=dict(req["values"], hide_bodies="silk-bot,finish-top")))[1]
+    assert not hid["cached"]                                      # the finish is in the copper: rebuilt
+    top = [p for p in hid["manifest"]["parts"] if p.get("kind") == "finish"]
+    assert top and all(p.get("side") != "top" for p in top)
 
     layer = _call(gui, "POST", "/api/scene", dict(req, spec="solder-bot:svg"))[1]
     assert layer["manifest"]["flat"] and layer["manifest"]["mode"] == "layer"

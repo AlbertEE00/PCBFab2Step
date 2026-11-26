@@ -58,7 +58,8 @@ LABELS = {
     "paste": "Solder paste", "components": "Components", "mask_color": "Colour", "mask_thickness": "Thickness",
     "drill_through_mask": "Vias cut the mask", "silk_color": "Colour", "silk_thickness": "Thickness",
     "clip_silk": "Clip to the mask openings", "finish_type": "Type", "finish_color": "Colour",
-    "finish_thickness": "Thickness", "paste_color": "Colour", "paste_thickness": "Thickness",
+    "finish_thickness": "Thickness", "finish_body": "Body", "finish_area": "Where",
+    "finish_layers": "From layers", "paste_color": "Colour", "paste_thickness": "Thickness",
     "copper_color": "Copper colour", "copper_thickness": "Copper thickness", "board_color": "Laminate colour",
     "board_thickness": "Board thickness", "plating_thickness": "Plating", "via_plating_thickness": "Via plating",
     "plating_color": "Colour", "via_fill": "Fill", "via_cap": "Cap", "via_tent": "Tent", "via_plug": "Plug",
@@ -78,7 +79,8 @@ GROUPS = [
     ("sanitize", "Sanitize", "sanitize", ["sanitize"]),
     ("mask", "Solder mask", "mask", ["mask_color", "mask_thickness", "drill_through_mask"]),
     ("silk", "Silkscreen", "silk", ["silk_color", "silk_thickness", "clip_silk", "silk_simplify", "silk_body"]),
-    ("finish", "Surface finish", "finish", ["finish_type", "finish_color", "finish_thickness"]),
+    ("finish", "Surface finish", "finish", ["finish_type", "finish_color", "finish_body", "finish_thickness",
+                                            "finish_area", "finish_layers"]),
     ("paste", "Solder paste", "paste", ["paste_color", "paste_thickness"]),
     ("components", "Components", "components", []),
     ("bodies", "Bodies left out", None, ["hide_bodies"]),
@@ -121,6 +123,10 @@ def _default_text(attr: str) -> str:
     sec, key, kind, builtin, tmpl, help_ = SETTING[attr]
     if attr == "sanitize":
         return "exposed"
+    if attr == "finish_type":
+        return "from the fab data, else ENIG"
+    if attr == "finish_thickness":
+        return "from the fab data, else none"
     if builtin is None or tmpl == "default":
         return "from the fab data"
     if kind == "bool":

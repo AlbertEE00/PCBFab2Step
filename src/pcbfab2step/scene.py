@@ -251,6 +251,40 @@ def disc_mesh(x: float, y: float, r_out: float, r_in: float, z0: float, z1: floa
     return Mesh(pos, tri, edges)
 
 
+def cone_ring_mesh(x: float, y: float, r_out: float, r_a: float, z_a: float, r_b: float, z_b: float) -> Optional[Mesh]:
+    """The material around a countersink between z_a and z_b: a ring whose
+    outside is the cylinder r_out and whose inside is the cone, r_a at z_a
+    and r_b at z_b (z_a < z_b)."""
+    if z_b - z_a <= 1e-9 or min(r_a, r_b) >= r_out:
+        return None
+    r_a, r_b = min(r_a, r_out), min(r_b, r_out)
+    k = max(24, min(Tess.nseg(r_out), 128))
+    t = np.arange(k) * (2 * math.pi / k)
+    c, s = np.cos(t), np.sin(t)
+    i = np.arange(k)
+    j = (i + 1) % k
+    pos = np.empty((4 * k, 3))
+    pos[:k] = np.column_stack([x + r_out * c, y + r_out * s, np.full(k, z_a)])
+    pos[k:2 * k] = np.column_stack([x + r_out * c, y + r_out * s, np.full(k, z_b)])
+    pos[2 * k:3 * k] = np.column_stack([x + r_a * c, y + r_a * s, np.full(k, z_a)])
+    pos[3 * k:] = np.column_stack([x + r_b * c, y + r_b * s, np.full(k, z_b)])
+    ob, ot, ib, it = 0, k, 2 * k, 3 * k
+    tri = np.vstack([
+        np.column_stack([ob + i, ob + j, ot + j]), np.column_stack([ob + i, ot + j, ot + i]),       # outside
+        np.column_stack([ib + j, ib + i, it + i]), np.column_stack([ib + j, it + i, it + j]),       # the cone
+        np.column_stack([ot + i, ot + j, it + j]), np.column_stack([ot + i, it + j, it + i]),       # top
+        np.column_stack([ob + j, ob + i, ib + i]), np.column_stack([ob + j, ib + i, ib + j]),       # bottom
+    ])
+    # a ring that ends on the cone's edge (r = r_out) has no top or bottom
+    keep = np.ones(len(tri), bool)
+    if r_out - r_b <= 1e-9:
+        keep[4 * k:6 * k] = False
+    if r_out - r_a <= 1e-9:
+        keep[6 * k:] = False
+    edges = np.vstack([np.column_stack([ib + i, ib + j]), np.column_stack([it + i, it + j])])
+    return Mesh(pos, tri[keep], edges)
+
+
 @dataclass
 class Prism:
     """A prism waiting for its cap triangles (made for all at once, see realize)."""
@@ -282,6 +316,10 @@ class MeshGeo:
     @staticmethod
     def disc_prism(x, y, r_out, r_in, z0, z1):
         return disc_mesh(x, y, r_out, r_in, z0, z1)
+
+    @staticmethod
+    def cone_ring(x, y, r_out, r_a, z_a, r_b, z_b):
+        return cone_ring_mesh(x, y, r_out, r_a, z_a, r_b, z_b)
 
 
 def realize(solid_lists: List[list]) -> List[Mesh]:
