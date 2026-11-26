@@ -1191,23 +1191,57 @@ class Model:
             cache[key] = g
         return g
 
+    def _is_exact(self) -> bool:
+        g = self.geo.geo if isinstance(self.geo, Simplified) else self.geo
+        return g is Brep
+
     def slab(self, base, z0, z1, cache, cuts=None, label=None):
+        """A layer's bodies: base minus the cuts. A cut through the whole layer is
+        a hole in the prism; one that ends inside it (back drill, the drill
+        under a countersink, a counterbore floor) is cut out of the one prism
+        as a blind hole, so the layer stays one body, not slabs split at the
+        cut's depth."""
         if base is None or base.is_empty or z1 - z0 <= 1e-9:
             return []
         cuts = [c for c in (self.cuts if cuts is None else cuts) if c.z_lo < z1 - EPS_Z and c.z_hi > z0 + EPS_Z]
-        ev = sorted({z0, z1} | {z for c in cuts for z in (c.z_lo, c.z_hi) if z0 + 1e-6 < z < z1 - 1e-6})
+        full = [c for c in cuts if c.z_lo <= z0 + 1e-6 and c.z_hi >= z1 - 1e-6]
+        part = [c for c in cuts if c.z_lo > z0 + 1e-6 or c.z_hi < z1 - 1e-6]
+        reg = clean(gdiff(base, self._cut_union(full, cache)))
+        if label:
+            low = [c for c in part if c.z_lo <= z0 + 1e-6]
+            self.svg[label] = clean(gdiff(reg, union_all(c.region for c in low))) if low else reg
+        if not part or reg.is_empty:
+            return self.geo.prisms(reg, z0, z1)
+        if self._is_exact():
+            # blind holes: one Boolean cut of the prisms by the partial cuts (run past
+            # the layer's faces they open, so no face is shared with the tool)
+            tools = []
+            for c in part:
+                a = z0 - 0.01 if c.z_lo <= z0 + 1e-6 else c.z_lo
+                b = z1 + 0.01 if c.z_hi >= z1 - 1e-6 else c.z_hi
+                g = clean(ginter(c.region, reg.buffer(0.01)))
+                if not g.is_empty:
+                    tools += [(t, bbox(t)) for t in Brep.prisms(g, a, b)]
+            out = []
+            for sld in self.geo.prisms(reg, z0, z1):
+                sb = bbox(sld)
+                hit = [t for t, tb in tools if sb is None or tb is None or not (
+                    tb[3] < sb[0] or tb[0] > sb[3] or tb[4] < sb[1] or tb[1] > sb[4])]
+                out.extend(cut_shapes(sld, hit, "a blind hole cut") if hit else [sld])
+            return out
+        # meshes: the prism without the cuts' footprints, and the material in the
+        # footprints between the cut depths as plugs (inside the body, unseen)
+        U = clean(ginter(union_all(c.region for c in part), reg))
+        out = list(self.geo.prisms(clean(gdiff(reg, U)), z0, z1))
+        ev = sorted({z0, z1} | {z for c in part for z in (c.z_lo, c.z_hi) if z0 + 1e-6 < z < z1 - 1e-6})
         merged = [ev[0]]
         for z in ev[1:]:
             if z - merged[-1] > 1e-6:
                 merged.append(z)
         merged[-1] = z1
-        out = []
         for a, b in zip(merged[:-1], merged[1:]):
-            act = [c for c in cuts if c.z_lo <= a + 1e-6 and c.z_hi >= b - 1e-6]
-            reg = clean(gdiff(base, self._cut_union(act, cache)))
-            if label and a == merged[0]:
-                self.svg[label] = reg
-            out.extend(self.geo.prisms(reg, a, b))
+            act = [c for c in part if c.z_lo <= a + 1e-6 and c.z_hi >= b - 1e-6]
+            out.extend(self.geo.prisms(clean(gdiff(U, self._cut_union(act, cache))), a, b))
         return out
 
     def _coat_cuts(self, side):

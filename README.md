@@ -146,6 +146,7 @@ any of them (`--set finish.type=ENIG`, `--set backdrill.stub=0.05`,
 | `--thickness ITEM=SIZE` | `board` (copper to copper; the dielectrics scale), `copper`, `mask`, `silk`, `finish`, `paste`, `plating`, `via-plating`, `cap`, `stencil`, or a layer name; comma list | `[stackup]`, `[soldermask] thickness`, ..., `[stackup.layers]` |
 | `--color ITEM=COLOR` | `board`, `copper`, `mask`, `silk`, `finish`, `plating`, `fill`, `cap`, `paste`; a name, `#RRGGBB` or `R,G,B` | `[soldermask] color`, ... |
 | `--show LIST`, `--hide LIST` | model layers: `mask`, `silk`, `finish`, `paste` (off by default), `components` | `enabled` keys, `[model] components` |
+| `--mesh LIST` | bodies written into the STEP as triangle meshes (AP242): names as for `--hide`, or `all` | `[model] mesh` |
 | `--sanitize [LEVEL]` | `outer`, `exposed` (default), `pads` | `[model] sanitize` |
 | `--vias RULE` | IPC-4761 rule, `none`, `undrilled`, `drilled` | `[vias]` |
 | `--counterhole[-top\|-bottom] SPEC` | counterhole type, angle, depth | `[counterholes]` |
@@ -224,6 +225,18 @@ hole body (`plating`, `fill`, `plug`, `cap`), a designator of the ECAD STEP
 the file: the rest of the model stays where it is. `--show NAME` takes back a
 body that config.toml (`[model] hide = [...]`) leaves out. A name that
 matches no body is reported.
+
+### Bodies as meshes
+
+`--mesh LIST` (`[model] mesh = [...]`) writes the bodies it names (names as
+for `--hide`, or `all`) into the STEP as triangle meshes
+(TRIANGULATED_SURFACE_SET) and the rest as exact solids. Only AP242 has
+meshes, so such a STEP is AP242 whatever `[output] schema` says (AP214 drops
+them). `model.mesh_tolerance` (0.005 mm) is the largest gap to the exact
+surface. Not every CAD tool imports AP242 meshes, and they do not make the
+file smaller: OpenCascade writes each triangle corner with its normal, so on
+a dense board meshing the silkscreen took 109 MB to 102 MB, and meshing
+everything gave 123 MB.
 
 ### Hiding design detail
 
@@ -455,7 +468,7 @@ pcbfab2step FAB --export solder-bot:svg --invert --view
 ```
 
 The preview is meshed straight from the 2D region every solid of the STEP is
-made of (countersinks as stepped discs); `exact` builds the B-rep solids and
+made of (countersinks as cones, as in the STEP); `exact` builds the B-rep solids and
 shows those. In the viewer:
 
 | | |
@@ -553,6 +566,12 @@ tools/
 
 The version continues the single-file `odb2step` (1.0.0 to 1.1.0, ODB++ only).
 
+- 2.5.0: `--mesh` and `[model] mesh`: bodies written into the STEP as
+  triangle meshes (AP242). A cut that ends inside a layer (back drill, the
+  drill under a countersink, a counterbore floor) is a blind hole in that
+  layer's one body; the layer was split into slabs at its depth. GUI: the
+  components of each side on their own switch, a table of every body (in the
+  model, as a mesh) and a mesh toggle on each layer row.
 - 2.4.0: a surface finish without one in the fab data (Altium leaves it out
   of ODB++ and IPC-2581): ENIG by default on the exposed copper, as the
   copper's colour or as a body (`finish.body`, `finish.area`,

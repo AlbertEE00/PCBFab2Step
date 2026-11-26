@@ -37,7 +37,8 @@ KIND_COLOR = {"board_color": ("core", "dielectric", "board"), "copper_color": ("
               "silk_color": ("silk",), "paste_color": ("paste",), "plating_color": ("plating",),
               "cap_color": ("cap",), "finish_color": ("finish",), "fill_color": ("fill", "plug")}
 # what only the view changes: no new scene for these
-VIEW_ONLY = {"paste", "components", "hide_bodies", "format", "mesh_from", "schema", "svg_dir"} | set(KIND_COLOR)
+VIEW_ONLY = {"paste", "components", "hide_bodies", "mesh_bodies", "mesh_tolerance", "format", "mesh_from", "schema",
+             "svg_dir"} | set(KIND_COLOR)
 
 
 class Gui(WebApp):

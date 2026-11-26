@@ -70,7 +70,8 @@ LABELS = {
     "odb_step": "ODB++ step", "schema": "STEP protocol", "svg_dir": "Region SVGs to", "rout": "Rout layers",
     "arc_tolerance": "Arc tolerance", "arc_fit": "Arc fit", "max_holes_per_face": "Holes per face",
     "aperture_offset": "Aperture offset", "stencil_thickness": "Stencil thickness",
-    "silk_simplify": "Simplify", "silk_body": "Body", "simplify": "Simplify", "hide_bodies": "Bodies",
+    "silk_simplify": "Simplify", "silk_body": "Body", "simplify": "Simplify", "hide_bodies": "Left out", "mesh_bodies": "As meshes",
+    "mesh_tolerance": "Mesh tolerance",
     "mesh_from": "Meshes from",
 }
 
@@ -83,7 +84,7 @@ GROUPS = [
                                             "finish_area", "finish_layers"]),
     ("paste", "Solder paste", "paste", ["paste_color", "paste_thickness"]),
     ("components", "Components", "components", []),
-    ("bodies", "Bodies left out", None, ["hide_bodies"]),
+    ("bodies", "Bodies", None, ["hide_bodies", "mesh_bodies"]),
     ("stack", "Copper and laminate", None, ["copper_color", "copper_thickness", "board_color", "board_thickness",
                                             "layer_thickness"]),
     ("vias", "Vias", None, ["vias_drilled", "via_fill", "via_cap", "via_tent", "via_plug", "via_max_diameter",
@@ -94,7 +95,7 @@ GROUPS = [
                                             "counterhole_depth_mode", "counterbore_rules", "countersink_rules"]),
     ("backdrill", "Back drills", None, ["backdrill_stub"]),
     ("sources", "Sources", None, ["use_sources", "odb_step", "config", "no_config"]),
-    ("file", "Output file", None, ["schema", "mesh_from", "svg_dir"]),
+    ("file", "Output file", None, ["schema", "mesh_from", "mesh_tolerance", "svg_dir"]),
     ("geometry", "Geometry", None, ["simplify", "rout", "arc_tolerance", "arc_fit", "max_holes_per_face"]),
 ]
 EXPORT_GROUP = ["invert", "outline", "aperture_offset", "stencil_thickness"]
@@ -151,6 +152,7 @@ def flag_hint(attr: str) -> str:
     hints = {"sanitize": "--sanitize outer|exposed|pads", "use_sources": "--sources LIST", "config": "--config FILE",
              "format": "--format step|glb|gltf|obj|fbx|stl|ply|3mf",
              "hide_bodies": "--hide silk-bot,solder-top,copper-2,components-top,U1,...",
+             "mesh_bodies": "--mesh silk,solder-top,components-bot,...",
              "no_config": "--no-config", "vias_drilled": "--vias drilled|undrilled", "via_protection": "--vias RULE",
              "layer_thickness": "--thickness LAYER=SIZE", "aperture_offset": "--aperture-offset SIZE",
              "invert": "--invert", "outline": "--outline / --no-outline"}
@@ -226,6 +228,9 @@ def _flags(attr: str, v, export: bool) -> List[str]:
         return ["--vias", str(v)]
     if attr == "via_protection":
         return [x for r in _lines(v) for x in ("--vias", r)]
+    if attr == "mesh_bodies":
+        names = _lines(str(v).replace(",", "\n"))
+        return ["--mesh", ",".join(names)] if names and not export else []
     if attr == "layer_thickness":
         return [x for r in _lines(v) for x in ("--thickness", r)]
     if attr in COUNTERHOLE_FLAG:

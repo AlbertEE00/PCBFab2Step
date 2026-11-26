@@ -161,6 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="leave out: mask, silk, finish, paste, components (both sides), or single bodies: "
                         "silk-bot, solder-top, finish-top, paste-bot, copper-2, components-bot, a designator "
                         "(U1) or a layer name")
+    m.add_argument("--mesh", action="append", default=[], metavar="LIST",
+                   help="write these bodies into the STEP as triangle meshes (AP242): names as for --hide, "
+                        "e.g. silk,solder-top,components-bot, or all")
     m.add_argument("--counterhole", action="append", default=[], metavar="SPEC",
                    help="both sides: type=bore|sink angle=DEG depth=SIZE (see below)")
     m.add_argument("--counterhole-top", action="append", default=[], metavar="SPEC", help="top side")
@@ -267,7 +270,8 @@ def settings_from_args(args) -> SimpleNamespace:
     c = SimpleNamespace(layer_thickness=[], via_protection=[], counterhole=list(args.counterhole),
                         counterhole_top=list(args.counterhole_top),
                         counterhole_bottom=list(args.counterhole_bottom), counterbore_rules=[],
-                        countersink_rules=[], vias_drilled=None, hide_bodies=[], show_bodies=[], _labels={})
+                        countersink_rules=[], vias_drilled=None, hide_bodies=[], show_bodies=[], mesh_bodies=[],
+                        _labels={})
     lab = c._labels
     by_key = {f"{sec}.{key}": (attr, kind) for sec, key, attr, kind, *_ in SCHEMA}
     for item in args.set:
@@ -330,6 +334,9 @@ def settings_from_args(args) -> SimpleNamespace:
             shown[attr] = on
             setattr(c, attr, on)
             lab[attr] = f"{flag} {item}"
+    for item in _items(args.mesh):
+        c.mesh_bodies.append(item)
+        lab["mesh_bodies"] = "--mesh"
     both = {_key(x) for x in c.hide_bodies} & {_key(x) for x in c.show_bodies}
     if both:
         raise SystemExit(f"{', '.join(sorted(both))}: both shown and hidden")

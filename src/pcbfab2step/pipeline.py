@@ -121,6 +121,26 @@ def drop_hidden(comps: list, model, opts, report: bool = True) -> list:
     return keep
 
 
+def mark_mesh(comps: list, model, opts, report: bool = True) -> int:
+    """Flag the bodies --mesh names (written as triangle meshes); returns how many."""
+    want = {canon(x) for x in (getattr(opts, "mesh_bodies", None) or [])}
+    if not want:
+        return 0
+    idx = copper_index(model)
+    every = "all" in want
+    used, n = set(), 0
+    for c in comps:
+        hit = want.intersection(body_names(c, idx))
+        if every or hit:
+            c["mesh"] = True
+            n += 1
+        used |= hit
+    if report:
+        for name in sorted(want - used - {"all"}):
+            warn(f"--mesh {name}: no body of that name")
+    return n
+
+
 class Session:
     """What jobs share: boards read from the fab data (the expensive part)."""
 
@@ -382,7 +402,13 @@ class Job:
         os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
         info(f"Writing {out} ...")
         root = f"{m.board.name} {m.board.step}".strip()
-        write_step(out, root, m.components, self.opts.schema, fmt=LABEL[self.srcs.primary])
+        schema = self.opts.schema
+        if mark_mesh(m.components, m, self.opts):
+            if schema.upper() != "AP242":
+                info(f"  bodies as meshes: the STEP is AP242 (not {schema}); AP214 has no meshes")
+            schema = "AP242"
+        write_step(out, root, m.components, schema, fmt=LABEL[self.srcs.primary],
+                   mesh_tol=getattr(self.opts, "mesh_tolerance", 0.005))
         return out
 
     def write_export(self) -> List[str]:

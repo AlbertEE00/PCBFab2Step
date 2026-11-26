@@ -812,7 +812,7 @@ def volume(shape) -> float:
     return p.Mass()
 
 
-def cut_shapes(shape, tools):
+def cut_shapes(shape, tools, what: str = "a countersink cut"):
     if not tools:
         return [shape]
     try:
@@ -822,11 +822,11 @@ def cut_shapes(shape, tools):
         c.SetRunParallel(True)
         c.Build()
         if not c.IsDone() or _has_errors(c):
-            warn("a countersink cut failed; body left uncut")
+            warn(f"{what} failed; body left uncut")
             return [shape]
         return solids_of(c.Shape())
     except Exception:
-        warn("a countersink cut failed; body left uncut")
+        warn(f"{what} failed; body left uncut")
         return [shape]
 
 
@@ -852,7 +852,47 @@ class _Quiet:
             os.close(self.null)
 
 
-def write_step(path: str, root_name: str, components, schema: str = "AP214", fmt: str = "ODB++"):
+def mesh_face(shape, tol: float = 0.005):
+    """A solid as one face that holds only its triangles (no surface): STEP
+    AP242 writes it as a TRIANGULATED_SURFACE_SET. The corners of each face
+    of the solid stay its own, so their normals keep the edges sharp."""
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.Poly import Poly_Triangle, Poly_Triangulation
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.TopoDS import TopoDS
+    BRepMesh_IncrementalMesh(shape, tol, False, 0.35, True)
+    pts, tris = [], []
+    ex = TopExp_Explorer(shape, TopAbs_FACE)
+    while ex.More():
+        f = TopoDS.Face(ex.Current())
+        loc = TopLoc_Location()
+        tri = OCC.BRep.BRep_Tool.Triangulation_s(f, loc)
+        if tri is not None:
+            tr, off = loc.Transformation(), len(pts)
+            for i in range(1, tri.NbNodes() + 1):
+                q = tri.Node(i).Transformed(tr)
+                pts.append((q.X(), q.Y(), q.Z()))
+            rev = f.Orientation() == TopAbs_REVERSED
+            for i in range(1, tri.NbTriangles() + 1):
+                a, b, c = tri.Triangle(i).Get()
+                tris.append((off + a, off + c, off + b) if rev else (off + a, off + b, off + c))
+        ex.Next()
+    if not tris:
+        return None
+    T = Poly_Triangulation(len(pts), len(tris), False)
+    for i, (x, y, z) in enumerate(pts, 1):
+        T.SetNode(i, OCC.gp.gp_Pnt(x, y, z))
+    for i, (a, b, c) in enumerate(tris, 1):
+        T.SetTriangle(i, Poly_Triangle(a, b, c))
+    face = OCC.TopoDS.TopoDS_Face()
+    OCC.BRep.BRep_Builder().MakeFace(face, T)
+    return face
+
+
+def write_step(path: str, root_name: str, components, schema: str = "AP214", fmt: str = "ODB++",
+               mesh_tol: float = 0.005):
     from OCP.TDocStd import TDocStd_Document
     from OCP.TCollection import TCollection_ExtendedString
     from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorType
@@ -881,6 +921,10 @@ def write_step(path: str, root_name: str, components, schema: str = "AP214", fmt
         bld = OCC.BRep.BRep_Builder()
         bld.MakeCompound(cmp)
         for s in comp["solids"]:
+            if comp.get("mesh"):
+                s = mesh_face(s, mesh_tol)
+                if s is None:
+                    continue
             bld.Add(cmp, s)
         lab = st.AddShape(cmp, False)
         TDataStd_Name.Set_s(lab, TCollection_ExtendedString(comp["name"]))

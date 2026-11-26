@@ -105,6 +105,11 @@ SCHEMA = [
     ("model", "hide", "hide_bodies", "list", [], [],
      "bodies left out of the model: silk-bot, solder-top, finish-bot, paste-top, copper-3, components-top, a "
      "designator (U1) or a layer name of the fab data; --hide adds to these, --show takes them back"),
+    ("model", "mesh", "mesh_bodies", "list", [], [],
+     "bodies written into the STEP as triangle meshes, not exact solids (names as for model.hide, or 'all'); "
+     "a STEP with meshes is AP242"),
+    ("model", "mesh_tolerance", "mesh_tolerance", "mm", 0.005, 0.005,
+     "largest gap between a mesh and the exact surface, mm"),
 
     ("export", "stencil_thickness", "stencil_thickness", "mm", 0.1, 0.1,
      "stencil plate thickness for --export stencil-...:step, mm"),
@@ -393,7 +398,7 @@ def resolve(cli, cfg: Optional[dict], cfg_label: str = "config.toml") -> SimpleN
     for attr, sec, key in (("via_protection", "vias", "rules"),
                            ("counterbore_rules", "counterholes", "counterbore_rules"),
                            ("countersink_rules", "counterholes", "countersink_rules"),
-                           ("hide_bodies", "model", "hide")):
+                           ("hide_bodies", "model", "hide"), ("mesh_bodies", "model", "mesh")):
         cv = cfg.get(sec, {}).get(key) if isinstance(cfg.get(sec), dict) else None
         lst = _convert("list", cv, key) if cv else []
         lst += list(getattr(cli, attr, None) or [])
