@@ -368,7 +368,8 @@ const groupEls = [];
 function buildGroups() {
   groupsEl.replaceChildren(h("div", { class: "block", style: "border:0;padding-bottom:0" }, h("h2", {}, "Options")));
   for (const g of M.groups) {
-    const body = h("div", { class: "gbody" }, ...g.options.map(control));
+    const body = h("div", { class: "gbody" }, ...(g.id === "components" ? [compSides] : g.id === "bodies" ? [bodiesTable] : []),
+      ...g.options.map(control));
     const count = h("span", { class: "count" });
     const open = h("button", { class: "open", "aria-expanded": "false", html: CHEVRON });
     open.append(h("span", {}, g.title), count);
@@ -395,7 +396,7 @@ function buildGroups() {
       el.classList.toggle("expanded");
       open.setAttribute("aria-expanded", String(el.classList.contains("expanded")));
     });
-    if (!g.options.length) open.querySelector("svg").style.visibility = "hidden";
+    if (!g.options.length && g.id !== "components") open.querySelector("svg").style.visibility = "hidden";
     groupsEl.append(el);
     groupEls.push({ g, el, count, box });
   }
@@ -511,7 +512,103 @@ function applyHidden() {
   chrome.refresh();
 }
 
+// bodies written as meshes into the STEP (--mesh): names as for --hide
+const KIND_WORDS = { mask: ["mask", "solder", "soldermask"], silk: ["silk", "silkscreen", "overlay"], copper: ["copper"],
+  finish: ["finish"], paste: ["paste"], components: ["components", "component", "parts"], dielectric: ["dielectric"] };
+function meshList() {
+  return String(S.values.mesh_bodies || "").split(/[,\n]+/).map((x) => x.trim()).filter(Boolean);
+}
+function setMeshList(list) {
+  const seen = new Set(), out = [];
+  for (const x of list) { const c = canonName(x); if (c && !seen.has(c)) { seen.add(c); out.push(x); } }
+  if (out.length) S.values.mesh_bodies = out.join(","); else delete S.values.mesh_bodies;
+}
+function coveredBy(b) {               // the --mesh words that name body b
+  const w = new Set(["all", canonName(b.name)]);
+  for (const k of KIND_WORDS[b.kind] || []) w.add(canonName(k));
+  return w;
+}
+function meshOn(b) {
+  const want = new Set(meshList().map(canonName));
+  return [...coveredBy(b)].some((w) => want.has(w));
+}
+function setMesh(b, on) {
+  let list = meshList();
+  if (on) list.push(b.name);
+  else {
+    const cover = coveredBy(b);
+    const wide = list.filter((x) => cover.has(canonName(x)) && canonName(x) !== canonName(b.name));
+    list = list.filter((x) => !cover.has(canonName(x)));
+    // a word that named this body and others (silk, all): the others stay meshes by name
+    for (const w of wide) for (const o of bodyList()) if (o.name !== b.name && coveredBy(o).has(canonName(w))) list.push(o.name);
+  }
+  setMeshList(list);
+  syncOptions();
+  renderLayers();
+  changed();
+}
+function bodyList() {                // every body the model has, top to bottom, by its --hide name
+  const out = [], seen = new Set();
+  for (const r of stackRows) {
+    if (!r.hide || seen.has(canonName(r.hide))) continue;
+    seen.add(canonName(r.hide));
+    out.push({ name: r.hide, kind: r.kind, sub: r.name !== r.hide ? r.name : "", row: r });
+  }
+  const kinds = new Set(((viewer.manifest && viewer.manifest.parts) || []).map((p) => p.kind));
+  for (const k of ["plating", "fill", "plug", "cap"]) if (kinds.has(k) && !seen.has(k)) out.push({ name: k, kind: k, sub: "holes", row: null });
+  return out;
+}
+function meshChip(r) {
+  if (!r.hide) return h("span");
+  const b = { name: r.hide, kind: r.kind };
+  const on = meshOn(b);
+  const el = h("button", { class: "mx", "aria-pressed": String(on), title: on ? `${r.hide} goes into the STEP as a mesh: click for exact solids` : `Exact solids in the STEP: click to write ${r.hide} as a triangle mesh (AP242)` }, "mesh");
+  el.addEventListener("click", (e) => { e.stopPropagation(); setMesh(b, !on); });
+  return el;
+}
+function bodyShown(b) {
+  return b.row ? rowShown(b.row) : !hiddenNow().has(canonName(b.name));
+}
+function setBodyShown(b, on) {
+  if (b.row) return toggleRow(b.row, on);
+  let list = hideList().filter((x) => canonName(x) !== canonName(b.name));
+  if (!on) list.push(b.name);
+  setHideList(list);
+  applyHidden();
+  syncOptions();
+  renderLayers();
+  changed();
+}
+
+// the Components group: each side on its own; the Bodies group: a table of every body
+const compSides = h("div");
+const bodiesTable = h("div");
+function renderBodyControls() {
+  const comps = stackRows.filter((r) => r.kind === "components");
+  if (!comps.length) compSides.replaceChildren(h("div", { class: "note" }, "No ECAD STEP found: the components come from it."));
+  else compSides.replaceChildren(...comps.map((r) => {
+    const box = h("input", { type: "checkbox", checked: rowShown(r), "aria-label": `${r.hide} in the model` });
+    box.addEventListener("change", () => toggleRow(r, box.checked));
+    return h("label", { class: "subsw", title: `--hide ${r.hide}` }, h("span", {}, r.side === "top" ? "Top side" : "Bottom side"),
+      h("span", { class: "switch" }, box, h("i")));
+  }));
+  const bodies = bodyList();
+  if (!bodies.length) { bodiesTable.replaceChildren(h("div", { class: "note" }, "The bodies show here once the board is read.")); return; }
+  const rows = bodies.map((b) => {
+    const shown = bodyShown(b);
+    const inc = h("input", { type: "checkbox", checked: shown, "aria-label": `${b.name} in the model` });
+    inc.addEventListener("change", () => setBodyShown(b, inc.checked));
+    const mesh = h("input", { type: "checkbox", checked: meshOn(b), "aria-label": `${b.name} as a mesh` });
+    mesh.addEventListener("change", () => setMesh(b, mesh.checked));
+    return h("tr", { class: shown ? "" : "left" }, h("td", { title: b.sub ? `${b.name} (${b.sub})` : b.name }, h("b", {}, b.name), b.sub ? h("span", {}, b.sub) : null),
+      h("td", {}, inc), h("td", { title: "Write it into the STEP as a triangle mesh (AP242)" }, mesh));
+  });
+  bodiesTable.replaceChildren(h("table", { class: "bodies-t" },
+    h("thead", {}, h("tr", {}, h("th", {}, "Body"), h("th", {}, "In model"), h("th", {}, "Mesh"))), h("tbody", {}, ...rows)));
+}
+
 function renderLayers() {
+  renderBodyControls();
   const xopts = buildExportOptions();
   const list = h("ul", { class: "stack" });
   const live = (ST && ST.colors) || {};
@@ -529,7 +626,7 @@ function renderLayers() {
       list.append(h("li", { class: `diel${shown ? "" : " out"}`, title: `${r.name} ${r.material || ""} ${thick(t)}` }, box,
         h("span", { class: "band", style: `background:${rgb(r.color)};height:${px}px` }),
         h("span", { class: "nm", style: `line-height:${Math.max(px - 2, 8)}px;height:${px}px;overflow:hidden` }, px >= 14 ? [h("b", {}, r.name), h("span", {}, r.material || "")] : null),
-        h("span", { class: "th" }, px >= 14 ? thick(t) : "")));
+        h("span", { class: "th" }, px >= 14 ? thick(t) : ""), meshChip(r)));
       continue;
     }
     const g = r.generic;
@@ -537,13 +634,15 @@ function renderLayers() {
     const viewing = S.layer && S.layer.target === g;
     const canExport = r.export !== false;
     const li = h("li", {
-      class: `layer ${r.kind}${r.kind === "outline" ? " outline" : ""}${r.data ? "" : " nodata"}${viewing || isSel ? " sel" : ""}${shown ? "" : " out"}`,
-      tabindex: "0", role: "button", "aria-expanded": String(isSel), title: r.data ? `${g} (${r.name})` : `${g}: no data in this layer`,
+      class: `layer ${r.kind}${r.kind === "outline" ? " outline" : ""}${r.data || r.kind === "finish" ? "" : " nodata"}${viewing || isSel ? " sel" : ""}${shown ? "" : " out"}`,
+      tabindex: "0", role: "button", "aria-expanded": String(isSel),
+      title: r.kind === "finish" ? `${g}: ${r.material}${r.data ? "" : ", not in the fab data (finish.type)"}${r.t ? "" : ", colours the copper"}` : r.data ? `${g} (${r.name})` : `${g}: no data in this layer`,
     },
       box,
       h("span", { class: "band", style: `background:${rgb(r.color)}` }),
       h("span", { class: "nm" }, h("b", {}, g), r.name && r.name !== g ? h("span", {}, r.name) : null),
-      h("span", { class: "th" }, r.kind === "components" ? "" : r.data ? thick(r.t) : "empty"));
+      h("span", { class: "th" }, r.kind === "components" ? "" : r.kind === "finish" ? (r.t ? `${r.material} ${thick(r.t)}` : r.material) : r.data ? thick(r.t) : "empty"),
+      meshChip(r));
     const toggle = () => { if (!canExport) return; selected = isSel ? null : g; renderLayers(); };
     li.addEventListener("click", (e) => { if (!e.target.closest(".acts")) toggle(); });
     li.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target === li) { e.preventDefault(); toggle(); } });

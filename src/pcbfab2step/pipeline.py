@@ -70,6 +70,11 @@ def body_names(c: dict, copper_index: Optional[dict] = None) -> List[str]:
         names.add(canon(c["layer"]))
     if kind == "copper" and copper_index and c.get("layer") in copper_index:
         names.add(f"copper{copper_index[c['layer']]}")
+    cu = c.get("copper_of")                 # a finish that colours the copper is that copper too
+    if cu:
+        names |= {canon(cu), canon(f"copper-{side}")} | ({canon(f"copper-{SIDE_WORDS[side][0]}")} if side in SIDE_WORDS else set())
+        if copper_index and cu in copper_index:
+            names.add(f"copper{copper_index[cu]}")
     names.discard("")
     return sorted(names)
 
@@ -99,7 +104,7 @@ def drop_hidden(comps: list, model, opts, report: bool = True) -> list:
     if not hide:
         return comps
     idx = copper_index(model)
-    keep, used = [], set()
+    keep, used = [], set(getattr(model, "hidden_done", ()) or ())
     for c in comps:
         hit = hide.intersection(body_names(c, idx))
         if hit:
@@ -110,10 +115,30 @@ def drop_hidden(comps: list, model, opts, report: bool = True) -> list:
         for name in sorted(hide - used):
             warn(f"--hide {name}: no body of that name (silk-bot, solder-top, copper-2, components-top, a "
                  "designator or a layer name)")
+        n = len(comps) - len(keep)
         if used:
-            info(f"  left out: {len(comps) - len(keep)} bod{'y' if len(comps) - len(keep) == 1 else 'ies'} "
-                 f"({', '.join(sorted(used))})")
+            info(f"  left out: {', '.join(sorted(used))}" + (f" ({n} bod{'y' if n == 1 else 'ies'})" if n else ""))
     return keep
+
+
+def mark_mesh(comps: list, model, opts, report: bool = True) -> int:
+    """Flag the bodies --mesh names (written as triangle meshes); returns how many."""
+    want = {canon(x) for x in (getattr(opts, "mesh_bodies", None) or [])}
+    if not want:
+        return 0
+    idx = copper_index(model)
+    every = "all" in want
+    used, n = set(), 0
+    for c in comps:
+        hit = want.intersection(body_names(c, idx))
+        if every or hit:
+            c["mesh"] = True
+            n += 1
+        used |= hit
+    if report:
+        for name in sorted(want - used - {"all"}):
+            warn(f"--mesh {name}: no body of that name")
+    return n
 
 
 class Session:
@@ -377,7 +402,13 @@ class Job:
         os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
         info(f"Writing {out} ...")
         root = f"{m.board.name} {m.board.step}".strip()
-        write_step(out, root, m.components, self.opts.schema, fmt=LABEL[self.srcs.primary])
+        schema = self.opts.schema
+        if mark_mesh(m.components, m, self.opts):
+            if schema.upper() != "AP242":
+                info(f"  bodies as meshes: the STEP is AP242 (not {schema}); AP214 has no meshes")
+            schema = "AP242"
+        write_step(out, root, m.components, schema, fmt=LABEL[self.srcs.primary],
+                   mesh_tol=getattr(self.opts, "mesh_tolerance", 0.005))
         return out
 
     def write_export(self) -> List[str]:

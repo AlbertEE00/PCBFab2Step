@@ -179,6 +179,20 @@ class Stackup:
         n = len(stack)
         self.top_cu = stack[0] if stack[0].kind == "copper" else None
         self.bot_cu = stack[-1] if stack[-1].kind == "copper" else None
+        # Altium leaves the stackup's surface finish out of ODB++ and IPC-2581:
+        # without one in the data each side with copper gets one (finish.type,
+        # ENIG by default), on its exposed copper
+        for side, cu in (("top", self.top_cu), ("bottom", self.bot_cu)):
+            if cu is not None and not self.coats[side].get("finish"):
+                F = Layer(row=cu.row, name=f"{side.upper()}_SURFACE_FINISH", kind="finish", implicit=True,
+                          empty=True, side=side)
+                if opts.finish_thickness:
+                    F.t, F.t_src = opts.finish_thickness, _src(opts, "finish_thickness", "finish thickness setting")
+                elif getattr(opts, "finish_body", "auto") == "solid":
+                    F.t, F.t_src = FINISH_SOLID, "standard default (no finish in the fab data)"
+                else:
+                    F.t, F.t_src = 0.0, "no finish in the fab data: colours the copper"
+                self.coats[side]["finish"].append(F)
         self.z_top = stack[0].z1
         self.z_bot = stack[-1].z0
         for i, L in enumerate(stack):
@@ -257,6 +271,7 @@ class Cut:
 
 
 CONE_OVERRUN = 0.010   # mm, see Model._apply_cones
+FINISH_SOLID = 0.004   # mm, a finish body without a thickness in the data or settings (ENIG: Ni about 4 um)
 
 
 @dataclass
@@ -308,6 +323,9 @@ class Simplified:
     def disc_prism(self, *a):
         return self.geo.disc_prism(*a)
 
+    def cone_ring(self, *a):
+        return self.geo.cone_ring(*a)
+
 
 class Model:
     def __init__(self, board: Board, opts):
@@ -318,6 +336,7 @@ class Model:
         self.holes: List[Hole] = list(board.holes)
         self.cuts: List[Cut] = []
         self.cones: List[Cone] = []
+        self.hidden_done: set = set()       # --hide names the build itself took care of
         self.prot_notes: List[str] = list(board.prot_notes)
         self.hole_notes: List[str] = []
         self.components: List[dict] = []
@@ -1172,23 +1191,57 @@ class Model:
             cache[key] = g
         return g
 
+    def _is_exact(self) -> bool:
+        g = self.geo.geo if isinstance(self.geo, Simplified) else self.geo
+        return g is Brep
+
     def slab(self, base, z0, z1, cache, cuts=None, label=None):
+        """A layer's bodies: base minus the cuts. A cut through the whole layer is
+        a hole in the prism; one that ends inside it (back drill, the drill
+        under a countersink, a counterbore floor) is cut out of the one prism
+        as a blind hole, so the layer stays one body, not slabs split at the
+        cut's depth."""
         if base is None or base.is_empty or z1 - z0 <= 1e-9:
             return []
         cuts = [c for c in (self.cuts if cuts is None else cuts) if c.z_lo < z1 - EPS_Z and c.z_hi > z0 + EPS_Z]
-        ev = sorted({z0, z1} | {z for c in cuts for z in (c.z_lo, c.z_hi) if z0 + 1e-6 < z < z1 - 1e-6})
+        full = [c for c in cuts if c.z_lo <= z0 + 1e-6 and c.z_hi >= z1 - 1e-6]
+        part = [c for c in cuts if c.z_lo > z0 + 1e-6 or c.z_hi < z1 - 1e-6]
+        reg = clean(gdiff(base, self._cut_union(full, cache)))
+        if label:
+            low = [c for c in part if c.z_lo <= z0 + 1e-6]
+            self.svg[label] = clean(gdiff(reg, union_all(c.region for c in low))) if low else reg
+        if not part or reg.is_empty:
+            return self.geo.prisms(reg, z0, z1)
+        if self._is_exact():
+            # blind holes: one Boolean cut of the prisms by the partial cuts (run past
+            # the layer's faces they open, so no face is shared with the tool)
+            tools = []
+            for c in part:
+                a = z0 - 0.01 if c.z_lo <= z0 + 1e-6 else c.z_lo
+                b = z1 + 0.01 if c.z_hi >= z1 - 1e-6 else c.z_hi
+                g = clean(ginter(c.region, reg.buffer(0.01)))
+                if not g.is_empty:
+                    tools += [(t, bbox(t)) for t in Brep.prisms(g, a, b)]
+            out = []
+            for sld in self.geo.prisms(reg, z0, z1):
+                sb = bbox(sld)
+                hit = [t for t, tb in tools if sb is None or tb is None or not (
+                    tb[3] < sb[0] or tb[0] > sb[3] or tb[4] < sb[1] or tb[1] > sb[4])]
+                out.extend(cut_shapes(sld, hit, "a blind hole cut") if hit else [sld])
+            return out
+        # meshes: the prism without the cuts' footprints, and the material in the
+        # footprints between the cut depths as plugs (inside the body, unseen)
+        U = clean(ginter(union_all(c.region for c in part), reg))
+        out = list(self.geo.prisms(clean(gdiff(reg, U)), z0, z1))
+        ev = sorted({z0, z1} | {z for c in part for z in (c.z_lo, c.z_hi) if z0 + 1e-6 < z < z1 - 1e-6})
         merged = [ev[0]]
         for z in ev[1:]:
             if z - merged[-1] > 1e-6:
                 merged.append(z)
         merged[-1] = z1
-        out = []
         for a, b in zip(merged[:-1], merged[1:]):
-            act = [c for c in cuts if c.z_lo <= a + 1e-6 and c.z_hi >= b - 1e-6]
-            reg = clean(gdiff(base, self._cut_union(act, cache)))
-            if label and a == merged[0]:
-                self.svg[label] = reg
-            out.extend(self.geo.prisms(reg, a, b))
+            act = [c for c in part if c.z_lo <= a + 1e-6 and c.z_hi >= b - 1e-6]
+            out.extend(self.geo.prisms(clean(gdiff(U, self._cut_union(act, cache))), a, b))
         return out
 
     def _coat_cuts(self, side):
@@ -1318,8 +1371,6 @@ class Model:
         exact = self.geo is Brep
         if exact:
             OCC.load()
-        elif self.cones:
-            self._cone_steps()
         o = self.opts
         if getattr(o, "simplify", 0.0) > 0 and not isinstance(self.geo, Simplified):
             self.geo = Simplified(self.geo, o.simplify)
@@ -1332,6 +1383,7 @@ class Model:
                   if L.kind == "copper" and not (ext and 0 < i < n - 1)}
         for k, g in cu_img.items():
             self.svg[f"copper_{k}"] = g
+        self._fin = {side: self._finish_plan(side, cu_img) for side in ("top", "bottom")}
         diel_extra: Dict[int, list] = defaultdict(list)
         stack_comps = []
         if ext and n > 2:
@@ -1344,7 +1396,12 @@ class Model:
                 continue
             info(f"  building {L.name} ...", 2)
             if L.kind == "copper":
-                solids = self.slab(cu_img[L.key], L.z0, L.z1, cache)
+                fin = next((f for f in self._fin.values() if f and f["mode"] == "color" and f["cu"] is L), None)
+                if fin is not None:            # the finish colours its part of the outer copper
+                    solids = self.slab(clean(gdiff(cu_img[L.key], fin["F"])), L.z0, L.z1, cache)
+                    fin["solids"] = self.slab(fin["F"], L.z0, L.z1, cache)
+                else:
+                    solids = self.slab(cu_img[L.key], L.z0, L.z1, cache)
                 stack_comps.append((i, L, solids))
                 if 0 < i < n - 1 and L.t > 1e-9:
                     fill = gdiff(self.B, cu_img[L.key])
@@ -1373,22 +1430,59 @@ class Model:
         for side in ("top", "bottom"):
             self._build_coatings(side, cu_img, cache)
         self._build_hole_bodies()
-        if self.cones and exact:
-            self._apply_cones()
+        if self.cones:
+            self._apply_cones() if exact else self._mesh_cones()
 
-    CONE_STEPS = 8
-
-    def _cone_steps(self):
-        """Meshes for the viewer: a countersink as a stack of discs (the exact
-        cone is cut from the solids)."""
+    def _mesh_cones(self):
+        """The viewer's countersinks: the cone's footprint comes out of every
+        prism it reaches, and goes back as the material around the cone, a
+        smooth ring for each body that fills the footprint (dielectrics) and
+        thin steps for one that fills it in part (copper). The STEP cuts the
+        exact cone instead (_apply_cones)."""
         for cn in self.cones:
-            n = self.CONE_STEPS
-            for k in range(n):
-                za = cn.z_wide + (cn.z_narrow - cn.z_wide) * k / n
-                zb = cn.z_wide + (cn.z_narrow - cn.z_wide) * (k + 1) / n
-                r = cn.r_wide + (cn.r_narrow - cn.r_wide) * (k + 0.5) / n
-                self.cuts.append(Cut(circle(cn.x, cn.y, r), min(za, zb), max(za, zb), "cone", False, False,
-                                     cid=len(self.cuts)))
+            lo, hi = min(cn.z_wide, cn.z_narrow), max(cn.z_wide, cn.z_narrow)
+            foot = circle(cn.x, cn.y, cn.r_wide)
+            fx0, fy0, fx1, fy1 = foot.bounds
+
+            def r_at(z):                      # cone radius at height z
+                f = abs(z - cn.z_wide) / max(hi - lo, 1e-12)
+                return cn.r_wide + (cn.r_narrow - cn.r_wide) * min(1.0, max(0.0, f))
+
+            for comp in self.components:
+                new, changed = [], False
+                for s in comp["solids"]:
+                    poly = getattr(s, "poly", None)
+                    if poly is None or s.z1 <= lo + 1e-9 or s.z0 >= hi - 1e-9:
+                        new.append(s)
+                        continue
+                    x0, y0, x1, y1 = poly.bounds
+                    if x1 < fx0 or x0 > fx1 or y1 < fy0 or y0 > fy1:
+                        new.append(s)
+                        continue
+                    local = clean(ginter(poly, foot))
+                    if local.is_empty:
+                        new.append(s)
+                        continue
+                    changed = True
+                    new.extend(self.geo.prisms(gdiff(poly, foot), s.z0, s.z1))
+                    a, b = max(s.z0, lo), min(s.z1, hi)
+                    for za, zb in ((s.z0, a), (b, s.z1)):          # above and below the cone
+                        new.extend(self.geo.prisms(local, za, zb))
+                    ra, rb = r_at(a), r_at(b)
+                    inner = circle(cn.x, cn.y, min(ra, rb))
+                    ring = gdiff(foot, inner)
+                    if ring.area > 0 and gdiff(ring, local).area < 1e-3 * ring.area:
+                        m = self.geo.cone_ring(cn.x, cn.y, cn.r_wide, ra, a, rb, b)
+                        if m is not None:
+                            new.append(m)
+                    else:                          # in part (copper): steps no taller than 20 um
+                        n = max(1, math.ceil((b - a) / 0.02))
+                        for k in range(n):
+                            za, zb = a + (b - a) * k / n, a + (b - a) * (k + 1) / n
+                            g = gdiff(local, circle(cn.x, cn.y, r_at(0.5 * (za + zb))))
+                            new.extend(self.geo.prisms(clean(g), za, zb))
+                if changed:
+                    comp["solids"] = new
 
     def _fill_target(self, i):
         st = self.stk.stack
@@ -1404,6 +1498,52 @@ class Model:
         if o.finish_color != "auto":
             return o.finish_color
         return parse_color(finish_color_for(o.finish_type or material))
+
+    FINISH_DEFAULT = "ENIG"
+
+    def finish_material(self, side) -> str:
+        fins = self.stk.coats[side].get("finish", [])
+        data = next((L.material for L in fins if L.material), "")
+        return self.opts.finish_type or data or self.FINISH_DEFAULT
+
+    def _finish_plan(self, side, cu_img):
+        """Where the surface finish goes on one side and how it is built:
+        solid (a body as thick as the finish, on the copper) or color (the
+        copper under the finish takes its colour). None without a finish."""
+        o = self.opts
+        cu = self.stk.top_cu if side == "top" else self.stk.bot_cu
+        fins = self.stk.coats[side].get("finish", [])
+        if o.no_finish or cu is None or not fins or cu.key not in cu_img:
+            return None
+        C = cu_img[cu.key]
+        t = max(L.t for L in fins)
+        mode = getattr(o, "finish_body", "auto")
+        if mode == "auto":
+            mode = "solid" if t > 0 else "color"
+        if mode == "solid" and t <= 0:
+            t = FINISH_SOLID
+        name = fins[0].name
+        if mode == "color":
+            # the finish hidden (--hide finish-top): the copper stays whole
+            from .pipeline import body_names, hide_set
+            hit = hide_set(o) & set(body_names(dict(kind="finish", side=side, layer=name)))
+            if hit:
+                self.hidden_done |= hit
+                return None
+        picked = [L for L in self.board.layers
+                  if any(fnmatch.fnmatch(L.name.lower(), p.lower()) for p in (getattr(o, "finish_layers", None) or []))
+                  and L.kind != "copper" and getattr(L, "side", "") in ("", side, "inner")]
+        if picked:
+            area = union_all(self.image(L) for L in picked)
+        else:
+            area = union_all(self.image(L) for L in fins if not L.implicit)
+        if area.is_empty:
+            M = None if getattr(o, "finish_area", "exposed") == "all" else self.mask_cover(side)
+            area = C if M is None else gdiff(C, M)
+        F = clean(ginter(area, C))
+        if F.is_empty:
+            return None
+        return dict(name=name, F=F, mode=mode, t=t, cu=cu, material=self.finish_material(side))
 
     def _build_coatings(self, side, cu_img, cache):
         o = self.opts
@@ -1444,28 +1584,23 @@ class Model:
         else:
             z_mask_top = None
         # surface finish
-        fins = coats.get("finish", []) if not o.no_finish else []
-        F = EMPTY
-        t_f = 0.0
-        fin_name, fin_mat = None, o.finish_type or ""
-        if fins:
-            t_f = max(L.t for L in fins)
-            fin_name = fins[0].name
-            fin_mat = o.finish_type or fins[0].material
-            img = union_all(self.image(L) for L in fins)
-            if img.is_empty:
-                img = C if M is None else gdiff(C, M)
-            F = ginter(img, C)
-        elif o.finish_thickness and cu is not None and not o.no_finish:
-            t_f = o.finish_thickness
-            fin_name = f"{side.upper()}_SURFACE_FINISH"
-            F = C if M is None else gdiff(C, M)
-        if t_f > 0 and not F.is_empty:
-            F = clean(gdiff(gdiff(F, holes_open), pierce))
-            self.svg[f"finish_{side}"] = F
-            solids = self.geo.prisms(F, *zr(z_cu, z_cu + sg * t_f))
-            nm = f"{fin_name} (surface finish{', ' + fin_mat if fin_mat else ''}, {t_f * 1000:.2f} um)"
-            self._comp(nm, self._finish_color(fin_mat), solids, fin_name, "finish", side)
+        fin = self._fin.get(side) if hasattr(self, "_fin") else None
+        solid_fin = fin is not None and fin["mode"] == "solid"
+        F = fin["F"] if solid_fin else EMPTY
+        t_f = fin["t"] if solid_fin else 0.0
+        if fin is not None:
+            self.svg[f"finish_{side}"] = fin["F"]
+            mat = fin["material"]
+            if fin["mode"] == "color":
+                nm = f"{fin['cu'].name} under {mat} ({fin['name']}: surface finish as the copper's colour)"
+                solids = fin.get("solids") or []
+            else:
+                F = clean(gdiff(gdiff(fin["F"], holes_open), pierce))
+                solids = self.geo.prisms(F, *zr(z_cu, z_cu + sg * fin["t"]))
+                nm = f"{fin['name']} (surface finish, {mat}, {fin['t'] * 1000:.2f} um)"
+            self._comp(nm, self._finish_color(mat), solids, fin["name"], "finish", side)
+            if fin["mode"] == "color" and solids:
+                self.components[-1]["copper_of"] = fin["cu"].name
         # silkscreen
         silks = coats.get("silk", []) if not o.no_silk else []
         if silks:

@@ -140,6 +140,79 @@ def test_hide_names_in_step(tmp_path, ipc_file, capsys):
         main([str(src), "--hide", "silk-top", "--show", "silk-top"])
 
 
+def test_mesh_bodies_in_step(tmp_path, ipc_file, capsys):
+    """--mesh writes bodies as triangle meshes (AP242 TRIANGULATED_SURFACE_SET);
+    the rest stay exact solids, and a CAD reader gets both back."""
+    pytest.importorskip("OCP")
+    src = _src(tmp_path, ipc_file)
+    out = tmp_path / "m.step"
+    assert main([str(src), "-o", str(out), "--mesh", "solder-top,copper-bot,nosuchbody"]) == 0
+    log = capsys.readouterr().out
+    assert "the STEP is AP242" in log and "--mesh nosuchbody: no body of that name" in log
+    text = out.read_text(errors="ignore")
+    assert "AP242" in text.split("ENDSEC;")[0]
+    assert text.count("TRIANGULATED_SURFACE_SET") >= 2 and "ADVANCED_FACE" in text
+    from OCP.BRep import BRep_Tool
+    from OCP.STEPControl import STEPControl_Reader
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.TopoDS import TopoDS
+    r = STEPControl_Reader()
+    r.ReadFile(str(out))
+    r.TransferRoots()
+    ex = TopExp_Explorer(r.OneShape(), TopAbs_FACE)
+    mesh = exact = 0
+    while ex.More():
+        f = TopoDS.Face(ex.Current())
+        if BRep_Tool.Surface_s(f) is None:
+            mesh += 1
+            assert BRep_Tool.Triangulation_s(f, TopLoc_Location()).NbTriangles() > 0
+        else:
+            exact += 1
+        ex.Next()
+    assert mesh >= 2 and exact > 50
+
+
+def test_layers_stay_whole():
+    """A cut that ends inside a layer (back drill, the drill under a countersink,
+    a counterbore floor) is a blind hole in that layer, not a split of the
+    whole layer at its depth: exact and fast alike."""
+    pytest.importorskip("OCP")
+    import pathlib
+    import tempfile
+
+    from conftest import IPC_XML
+    from pcbfab2step import cli, scene
+    from pcbfab2step.brep import Brep, bbox
+    from pcbfab2step.builder import Cut
+    from pcbfab2step.geometry import circle
+    from pcbfab2step.pipeline import Job, Session
+    p = pathlib.Path(tempfile.mkdtemp()) / "board.cvg"
+    p.write_text(IPC_XML, encoding="utf-8")
+    m = Job(cli.build_parser().parse_args([str(p), "-q"]), "model", Session()).prepare()
+    L = next(L for L in m.stk.stack if L.name == "CORE")
+    mid = 0.5 * (L.z0 + L.z1)
+    blind = [Cut(circle(20, 15, 0.4), mid, L.z1 + 0.1, "backdrill", False, False, cid=9001),
+             Cut(circle(25, 15, 0.3), L.z0 - 0.1, L.z1 + 0.1, "hole", False, False, cid=9002)]
+    m.geo = Brep
+    solids = m.slab(m.B, L.z0, L.z1, {}, cuts=blind)
+    assert len(solids) == 1                                    # one body, the blind hole cut into it
+    b = bbox(solids[0])
+    assert abs(b[2] - L.z0) < 1e-6 and abs(b[5] - L.z1) < 1e-6
+    vol = scene.shape_mesh(solids)
+    m.geo = scene.MeshGeo
+    fast = scene.realize([m.slab(m.B, L.z0, L.z1, {}, cuts=blind)])[0]
+
+    def v(mm):
+        a, b2, c = (mm.pos[mm.tri[:, k]] for k in range(3))
+        return float(np.einsum("ij,ij->i", a, np.cross(b2, c)).sum() / 6.0)
+    assert v(fast) == pytest.approx(v(vol), rel=1e-3)
+    full = m.B.area * (L.z1 - L.z0)
+    assert v(fast) == pytest.approx(full - circle(20, 15, 0.4).area * (L.z1 - mid)
+                                    - circle(25, 15, 0.3).area * (L.z1 - L.z0), rel=1e-4)
+
+
 def test_body_names():
     from pcbfab2step.pipeline import body_names, components_side
     names = body_names(dict(kind="mask", side="bottom", layer="Bottom Solder"))

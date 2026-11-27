@@ -105,6 +105,11 @@ SCHEMA = [
     ("model", "hide", "hide_bodies", "list", [], [],
      "bodies left out of the model: silk-bot, solder-top, finish-bot, paste-top, copper-3, components-top, a "
      "designator (U1) or a layer name of the fab data; --hide adds to these, --show takes them back"),
+    ("model", "mesh", "mesh_bodies", "list", [], [],
+     "bodies written into the STEP as triangle meshes, not exact solids (names as for model.hide, or 'all'); "
+     "a STEP with meshes is AP242"),
+    ("model", "mesh_tolerance", "mesh_tolerance", "mm", 0.005, 0.005,
+     "largest gap between a mesh and the exact surface, mm"),
 
     ("export", "stencil_thickness", "stencil_thickness", "mm", 0.1, 0.1,
      "stencil plate thickness for --export stencil-...:step, mm"),
@@ -137,11 +142,19 @@ SCHEMA = [
 
     ("finish", "enabled", "finish", "bool", True, True, "build the surface finish"),
     ("finish", "type", "finish_type", "str", None, "default",
-     "ENIG, ENEPIG, HASL, ImAg, ImSn, OSP, ... (sets the colour; default: fab data)"),
+     "ENIG, ENEPIG, HASL, ImAg, ImSn, OSP, ... (sets the colour; default: fab data, else ENIG)"),
     ("finish", "color", "finish_color", "color_auto", "auto", "auto", "auto: from the finish type"),
     ("finish", "thickness", "finish_thickness", "mm", None, "default",
-     "mm; without a finish layer in the fab data a value adds finish on all exposed copper "
-     "(default: fab data, else none)"),
+     "mm (default: fab data; Altium's ODB++ and IPC-2581 leave it out)"),
+    ("finish", "body", "finish_body", ("auto", "solid", "color"), "auto", "auto",
+     "solid: a body as thick as the finish on the copper; color: the copper under the finish takes its "
+     "colour (no added thickness); auto: solid when there is a thickness, else color"),
+    ("finish", "area", "finish_area", ("exposed", "all"), "exposed", "exposed",
+     "where the finish goes when the fab data has no finish artwork: exposed (copper not under the solder "
+     "mask) or all (all outer copper)"),
+    ("finish", "layers", "finish_layers", "list", [], [],
+     "fab layers whose features mark where the finish goes (instead of finish.area), names or wildcards; "
+     "a layer of one side applies to that side, others to both"),
 
     ("paste", "enabled", "paste", "bool", False, False, "build solder paste deposits"),
     ("paste", "color", "paste_color", "color", "#a6a6a6", "#a6a6a6", "solder paste colour"),
@@ -385,7 +398,7 @@ def resolve(cli, cfg: Optional[dict], cfg_label: str = "config.toml") -> SimpleN
     for attr, sec, key in (("via_protection", "vias", "rules"),
                            ("counterbore_rules", "counterholes", "counterbore_rules"),
                            ("countersink_rules", "counterholes", "countersink_rules"),
-                           ("hide_bodies", "model", "hide")):
+                           ("hide_bodies", "model", "hide"), ("mesh_bodies", "model", "mesh")):
         cv = cfg.get(sec, {}).get(key) if isinstance(cfg.get(sec), dict) else None
         lst = _convert("list", cv, key) if cv else []
         lst += list(getattr(cli, attr, None) or [])

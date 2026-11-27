@@ -100,8 +100,8 @@ def test_fast_scene_reuses_triangulations(ipc_file, monkeypatch):
 
 
 def test_fast_and_exact_agree(ipc_file):
-    """The fast meshes hold the volume of the exact solids (the countersink is
-    stepped in the fast view, so a little difference there)."""
+    """The fast meshes hold the volume of the exact solids, the countersink's
+    cone included (smooth in both)."""
     pytest.importorskip("OCP")
     sess = Session()
     fast = scene.model_scene(_job(ipc_file, session=sess))
@@ -109,7 +109,25 @@ def test_fast_and_exact_agree(ipc_file):
     assert exact.mode == "exact" and [p.name for p in fast.parts] == [p.name for p in exact.parts]
     for f, e in zip(fast.parts, exact.parts):
         vf, ve = _volume(f.mesh), _volume(e.mesh)
-        assert vf == pytest.approx(ve, rel=0.01), f.name
+        assert vf == pytest.approx(ve, rel=0.01 if ve < 1 else 0.001), f.name
+
+
+def test_fast_countersink_is_a_cone(ipc_file):
+    """The fast view makes the countersink a cone, not stacked discs: every
+    corner of the core inside the cone's footprint lies on the cone."""
+    job = _job(ipc_file)
+    sc = scene.model_scene(job)
+    cones = job.prepare().cones
+    assert cones
+    pos = np.vstack([p.mesh.pos for p in sc.parts if p.kind == "dielectric"])
+    for cn in cones:
+        lo, hi = sorted((cn.z_wide, cn.z_narrow))
+        r = np.hypot(pos[:, 0] - cn.x, pos[:, 1] - cn.y)
+        inside = (r > cn.r_narrow + 1e-6) & (r < cn.r_wide - 1e-6) & (pos[:, 2] > lo + 1e-6) & (pos[:, 2] < hi - 1e-6)
+        assert inside.any()
+        f = np.abs(pos[inside, 2] - cn.z_wide) / (hi - lo)
+        cone_r = cn.r_wide + (cn.r_narrow - cn.r_wide) * f
+        assert np.abs(r[inside] - cone_r).max() < 1e-6
 
 
 def test_feature_edges():

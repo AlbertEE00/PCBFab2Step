@@ -17,6 +17,7 @@ dropped on the window come with their full paths.
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -36,7 +37,8 @@ KIND_COLOR = {"board_color": ("core", "dielectric", "board"), "copper_color": ("
               "silk_color": ("silk",), "paste_color": ("paste",), "plating_color": ("plating",),
               "cap_color": ("cap",), "finish_color": ("finish",), "fill_color": ("fill", "plug")}
 # what only the view changes: no new scene for these
-VIEW_ONLY = {"paste", "components", "hide_bodies", "format", "mesh_from", "schema", "svg_dir"} | set(KIND_COLOR)
+VIEW_ONLY = {"paste", "components", "hide_bodies", "mesh_bodies", "mesh_tolerance", "format", "mesh_from", "schema",
+             "svg_dir"} | set(KIND_COLOR)
 
 
 class Gui(WebApp):
@@ -160,6 +162,14 @@ class Gui(WebApp):
         not the export settings for the model."""
         skip = VIEW_ONLY if export else VIEW_ONLY | set(O.EXPORT_ONLY) | {"stencil_thickness"}
         values = {k: v for k, v in (req.get("values") or {}).items() if k not in skip}
+        # a finish that colours the copper is built into it: leaving it out rebuilds the copper
+        from .pipeline import canon
+        hb = (req.get("values") or {}).get("hide_bodies") or []
+        if isinstance(hb, str):
+            hb = re.split(r"[,\n]+", hb)
+        fh = sorted(canon(x) for x in hb if "finish" in canon(x))
+        if fh:
+            values["finish_hidden"] = fh
         return json.dumps([req.get("inputs") or [], values, export], sort_keys=True)
 
     @staticmethod
@@ -371,13 +381,19 @@ def stack_rows(m, parts=None) -> List[dict]:
             rows.append(dict(kind="dielectric", side="", name=L.name, generic=None, z=(L.z0 + L.z1) / 2,
                              t=round(L.t, 5), color=rgb(o.board_color), data=True, material=L.material or "",
                              hide="core" if merged else L.name))
-    for c in m.components:
-        if c.get("kind") == "finish" and c.get("side"):
-            top = c["side"] == "top"
-            z = (st.z_top + 2e-6) if top else (st.z_bot - 2e-6)
-            rows.append(dict(kind="finish", side=c["side"], name=c.get("layer") or "finish",
-                             generic=f"finish-{'top' if top else 'bot'}", z=z, t=0.0, color=rgb(c["color"]),
-                             data=True, hide=f"finish-{'top' if top else 'bot'}", export=False))
+    built = {c.get("side"): c for c in m.components if c.get("kind") == "finish" and c.get("side")}
+    for side in ("top", "bottom"):
+        fins = st.coats[side].get("finish", [])
+        if not fins:
+            continue
+        top = side == "top"
+        c = built.get(side)
+        col = c["color"] if c else m._finish_color(m.finish_material(side))
+        z = (st.z_top + 2e-6) if top else (st.z_bot - 2e-6)
+        g = f"finish-{'top' if top else 'bot'}"
+        rows.append(dict(kind="finish", side=side, name=fins[0].name, generic=g, z=z, t=round(fins[0].t, 5),
+                         color=rgb(col), data=not fins[0].implicit, hide=g, export=False,
+                         material=m.finish_material(side)))
     paste_z = {r["side"]: r["z"] for r in rows if r["kind"] == "paste"}
     for r in rows:
         if r["kind"] == "stencil":
